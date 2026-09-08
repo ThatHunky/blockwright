@@ -66,6 +66,13 @@ export class RconBridge implements Bridge {
     return path.join(d, this.config.levelName, 'generated', 'blockwright', 'structure');
   }
 
+  /**
+   * Sends a raw string straight to RCON with no bounds/content checking here. That is
+   * intentional: this is the escape hatch for arbitrary console commands, and the safety
+   * net (the administrative-command denylist) lives at the tool layer in server-tools.ts,
+   * gating callers before they ever reach the bridge. Do not assume any validation happens
+   * below this point.
+   */
   async runCommand(command: string): Promise<string> {
     return this.send(command.replace(/^\//, '').trim());
   }
@@ -128,9 +135,31 @@ export class RconBridge implements Bridge {
     }
   }
 
-  private async maybeSnapshot(box: Box, opts: ApplyOptions): Promise<string | undefined> {
-    if (opts.snapshot === false || !this.canRead()) return undefined;
-    return (await this.snapshot(box, opts.world, opts.label)).id;
+  /**
+   * Decides what apply() should tell the caller about undo. Three outcomes:
+   *  - snapshot skipped (opts.snapshot === false or reads unavailable): both fields undefined.
+   *  - capture came back with zero pieces (the whole box is ungenerated terrain, so nothing
+   *    could be read): no snapshotId — a snapshotId here would imply undo works when it does
+   *    not — and a snapshotNote explaining why, in words the AI can relay verbatim.
+   *  - capture came back partial (some, but not all, of the box was ungenerated): snapshotId
+   *    is set (undo restores what was captured) plus a snapshotNote naming the gap.
+   */
+  private async maybeSnapshot(box: Box, opts: ApplyOptions): Promise<{ snapshotId?: string; snapshotNote?: string }> {
+    if (opts.snapshot === false || !this.canRead()) return {};
+    const record = await this.snapshot(box, opts.world, opts.label);
+    if (record.pieces.length === 0) {
+      const n = record.missingChunks ?? 0;
+      return {
+        snapshotNote: `Undo is unavailable for this change: the target area has ${n} ungenerated chunk column(s) and nothing else, so no blocks could be captured before writing. No snapshot record was kept — there is nothing it could restore.`,
+      };
+    }
+    if (record.missingChunks) {
+      return {
+        snapshotId: record.id,
+        snapshotNote: `Snapshot ${record.id} only covers part of this change: ${record.missingChunks} chunk column(s) inside the box were not generated and could not be captured. Undo will restore everything else, but not those areas.`,
+      };
+    }
+    return { snapshotId: record.id };
   }
 
   async applyCommands(commands: string[], box: Box, blocks: number, opts: ApplyOptions): Promise<ApplyResult> {
@@ -139,7 +168,7 @@ export class RconBridge implements Bridge {
     const base = { blocks, commands: commands.length, box, sample: commands.slice(0, 20) };
     if (opts.dryRun) return { ...base, dryRun: true, method: 'none', failed: 0, errors: [], elapsedMs: 0 };
     const errors: string[] = [];
-    const snapshotId = await this.maybeSnapshot(box, opts);
+    const { snapshotId, snapshotNote } = await this.maybeSnapshot(box, opts);
     let failed = 0;
     if (opts.forceload !== false) await this.forceload(box, opts.world, true, errors);
     try {
@@ -154,7 +183,7 @@ export class RconBridge implements Bridge {
       this.dirty = true;
       if (opts.forceload !== false) await this.forceload(box, opts.world, false, errors);
     }
-    return { ...base, dryRun: false, method: 'commands', failed, errors, elapsedMs: this.now() - start, snapshotId };
+    return { ...base, dryRun: false, method: 'commands', failed, errors, elapsedMs: this.now() - start, snapshotId, snapshotNote };
   }
 
   async apply(set: VoxelSet, opts: ApplyOptions): Promise<ApplyResult> {
@@ -178,7 +207,7 @@ export class RconBridge implements Bridge {
     };
     if (opts.dryRun) return { ...base, dryRun: true, method: 'structure', failed: 0, errors: [], elapsedMs: 0 };
     const errors: string[] = [];
-    const snapshotId = await this.maybeSnapshot(box, opts);
+    const { snapshotId, snapshotNote } = await this.maybeSnapshot(box, opts);
     const dir = this.generatedDir();
     await fs.mkdir(dir, { recursive: true });
     const id = newId();
@@ -203,14 +232,25 @@ export class RconBridge implements Bridge {
       await this.forceload(box, opts.world, false, errors);
       await this.prune(dir, /^paste_/, KEEP_PASTES);
     }
-    return { ...base, dryRun: false, method: 'structure', failed, errors, elapsedMs: this.now() - start, snapshotId };
+    return { ...base, dryRun: false, method: 'structure', failed, errors, elapsedMs: this.now() - start, snapshotId, snapshotNote };
   }
 
-  private async prune(dir: string, pattern: RegExp, keep: number): Promise<void> {
+  /**
+   * Deletes the oldest files matching `pattern` beyond `keep`, skipping anything younger
+   * than `graceMs`. Without the grace period, a concurrent operation's freshly written but
+   * not-yet-placed piece file could be pruned out from under it before it ever gets used.
+   * Uses the real wall clock (not the injectable `now`), since file mtimes always come from
+   * the OS clock regardless of what a test has done to the bridge's own clock.
+   */
+  private async prune(dir: string, pattern: RegExp, keep: number, graceMs = 60_000): Promise<void> {
     const entries = (await fs.readdir(dir)).filter((f) => pattern.test(f));
     const withTime = await Promise.all(entries.map(async (f) => ({ f, t: (await fs.stat(path.join(dir, f))).mtimeMs })));
+    const cutoff = Date.now() - graceMs;
     withTime.sort((a, b) => b.t - a.t);
-    for (const { f } of withTime.slice(keep)) await fs.rm(path.join(dir, f), { force: true });
+    for (const { f, t } of withTime.slice(keep)) {
+      if (t > cutoff) continue;
+      await fs.rm(path.join(dir, f), { force: true });
+    }
   }
 
   private async ensureSaved(): Promise<void> {
@@ -247,29 +287,80 @@ export class RconBridge implements Bridge {
     }
   }
 
-  private async writeIndex(records: SnapshotRecord[]): Promise<void> {
-    await fs.mkdir(this.generatedDir(), { recursive: true });
-    await fs.writeFile(this.indexPath(), JSON.stringify({ snapshots: records }, null, 2));
+  /**
+   * In-process mutex serialising every read-modify-write of snapshots.json. Each call waits
+   * for the previous one to finish (success or failure) before running, so two concurrent
+   * apply()/restore() calls on the same RconBridge instance can never interleave their
+   * read-modify-write and clobber each other's update.
+   *
+   * This only protects a single process. Two separate blockwright processes pointed at the
+   * same server directory can still race on snapshots.json — the atomic rename in
+   * writeIndexAtomic prevents a torn/truncated file, but not a cross-process lost update
+   * (both could read the same version, then each write back a version missing the other's
+   * new record). We deliberately do not add a cross-process lock file here: a robust one
+   * needs a stale-lock timeout and crash-safe cleanup, which is real additional surface for
+   * a case the project does not yet need to support (one blockwright instance per server).
+   * If that changes, add a `snapshots.json.lock` file (O_EXCL create, PID + timestamp
+   * inside, remove-if-stale-and-retry) around the critical sections below.
+   */
+  private indexLock: Promise<void> = Promise.resolve();
+
+  private async withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.indexLock;
+    let release!: () => void;
+    this.indexLock = new Promise<void>((resolve) => (release = resolve));
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  /** Writes snapshots.json by writing a temp file in the same directory and renaming it into
+   * place, so a crash or a concurrent reader never observes a truncated or half-written index. */
+  private async writeIndexAtomic(records: SnapshotRecord[]): Promise<void> {
+    const dir = this.generatedDir();
+    await fs.mkdir(dir, { recursive: true });
+    const tmp = path.join(dir, `.snapshots.json.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+    await fs.writeFile(tmp, JSON.stringify({ snapshots: records }, null, 2));
+    await fs.rename(tmp, this.indexPath());
   }
 
   async snapshot(box: Box, world: WorldRef, label?: string): Promise<SnapshotRecord> {
-    const { voxels, blockEntities } = await this.read(box, world);
+    const { voxels, blockEntities, missingChunks } = await this.read(box, world);
     const dir = this.generatedDir();
     await fs.mkdir(dir, { recursive: true });
     const id = newId();
     const pieces: SnapshotRecord['pieces'] = [];
     for (const [n, tile] of tileBox(box, this.config.templateMax).entries()) {
       const sub = voxels.within(tile);
-      if (sub.size === 0) continue; // chunk not generated yet: nothing to restore there
+      if (sub.size === 0) continue; // this tile is entirely inside chunks that were never generated: nothing there to capture
       const clip = clipboardFromVoxels(sub, this.config.dataVersion, blockEntities.filter((be) => boxContains(tile, be.pos)));
       const name = `snap_${id}_${n}`;
       await fs.writeFile(path.join(dir, `${name}.nbt`), writeNbtGz(writeStructure(clip)));
       pieces.push({ name, origin: sub.bounds()!.min });
     }
-    const record: SnapshotRecord = { id, world: world.label, box, pieces, createdAt: new Date(this.now()).toISOString(), label };
-    const records = [record, ...(await this.listSnapshots())];
-    for (const old of records.splice(KEEP_SNAPSHOTS)) for (const p of old.pieces) await fs.rm(path.join(dir, `${p.name}.nbt`), { force: true });
-    await this.writeIndex(records);
+    const record: SnapshotRecord = {
+      id,
+      world: world.label,
+      box,
+      pieces,
+      createdAt: new Date(this.now()).toISOString(),
+      label,
+      missingChunks: missingChunks || undefined,
+    };
+    // A snapshot that captured nothing is worse than no snapshot: it would sit in the index
+    // implying undo works, and restore() deleting it on a no-op "success" would erase the one
+    // record that could reveal the problem. So don't persist it — there is nothing it could
+    // restore, and no piece files were written for callers to clean up.
+    if (pieces.length === 0) return record;
+    await this.withIndexLock(async () => {
+      const records = [record, ...(await this.listSnapshots())];
+      const overflow = records.splice(KEEP_SNAPSHOTS);
+      await this.writeIndexAtomic(records);
+      for (const old of overflow) for (const p of old.pieces) await fs.rm(path.join(dir, `${p.name}.nbt`), { force: true });
+    });
     return record;
   }
 
@@ -277,6 +368,9 @@ export class RconBridge implements Bridge {
     const records = await this.listSnapshots();
     const record = records.find((r) => r.id === id);
     if (!record) throw new BridgeError(`no snapshot with id ${id}`);
+    if (record.pieces.length === 0) {
+      throw new BridgeError(`snapshot ${id} captured nothing when it was taken (its target area had no generated terrain); there is nothing to restore, and the record has been left in place.`);
+    }
     const world = resolveWorld(record.world, this.config.levelName);
     const errors: string[] = [];
     let restored = 0;
@@ -294,7 +388,13 @@ export class RconBridge implements Bridge {
     if (errors.length) throw new BridgeError(`restore ${id}: ${restored}/${record.pieces.length} pieces placed; ${errors.join('; ')}`);
     const dir = this.generatedDir();
     for (const p of record.pieces) await fs.rm(path.join(dir, `${p.name}.nbt`), { force: true });
-    await this.writeIndex(records.filter((r) => r.id !== id));
+    await this.withIndexLock(async () => {
+      // Re-read inside the lock rather than reusing `records`: a concurrent snapshot() may
+      // have added an entry since our initial read, and filtering that fresh read (instead
+      // of the stale one) is what keeps this from clobbering it.
+      const current = await this.listSnapshots();
+      await this.writeIndexAtomic(current.filter((r) => r.id !== id));
+    });
     return { restored, record };
   }
 

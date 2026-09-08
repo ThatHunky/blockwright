@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, readdirSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { RconClient } from '../../src/rcon/client.js';
 import { RconBridge } from '../../src/bridge/rcon-bridge.js';
@@ -9,6 +10,7 @@ import { resolveWorld } from '../../src/world/dimension.js';
 import { FakeRcon } from '../helpers/fake-rcon.js';
 import { testConfig } from '../helpers/config.js';
 import { fakeServerDir, flatChunk } from '../helpers/server-dir.js';
+import { formatApplyResult } from '../../src/tools/result.js';
 
 const st = (s: string) => BlockState.parse(s);
 const UUID = '11111111-2222-3333-4444-555555555555';
@@ -50,6 +52,12 @@ const overworld = resolveWorld('overworld', 'world');
 function cube(block: string): VoxelSet {
   const v = new VoxelSet();
   for (let x = 0; x < 2; x++) for (let y = 0; y < 2; y++) for (let z = 0; z < 2; z++) v.set(x, y + 64, z, st(block));
+  return v;
+}
+
+function cubeAt(block: string, x0: number, y0: number, z0: number): VoxelSet {
+  const v = new VoxelSet();
+  for (let x = 0; x < 2; x++) for (let y = 0; y < 2; y++) for (let z = 0; z < 2; z++) v.set(x0 + x, y0 + y + 64, z0 + z, st(block));
   return v;
 }
 
@@ -162,5 +170,115 @@ describe('read, snapshot, restore', () => {
     expect(await bridge.listSnapshots()).toHaveLength(0);
     expect(existsSync(path.join(dir, `${snaps[0].pieces[0].name}.nbt`))).toBe(false);
     await expect(bridge.restore('nope')).rejects.toThrow(/no snapshot/);
+  });
+});
+
+// Regression tests for defect 1: a snapshot must never silently capture nothing and then let
+// restore() erase the evidence. See the module docstrings on maybeSnapshot/snapshot/restore.
+describe('honest snapshots over ungenerated terrain', () => {
+  it('does not hand back a snapshotId when the whole box is ungenerated terrain, and keeps no phantom record', async () => {
+    const serverDir = await fakeServerDir([flatChunk()]);
+    const bridge = new RconBridge({ rcon, config: testConfig({ serverDir }), now });
+    // chunk 5,5 (x/z 80..95) was never written by flatChunk(): every chunk this box touches is missing.
+    const set = cubeAt('stone', 80, 0, 80);
+    const r = await bridge.apply(set, { world: overworld, label: 'nowhere' });
+    // The write itself still happens — losing undo shouldn't block the build — but nothing
+    // must claim undo is available for it.
+    expect(fake.commands.some((c) => c.startsWith('fill') || c.startsWith('setblock'))).toBe(true);
+    expect(r.snapshotId).toBeUndefined();
+    expect(r.snapshotNote).toMatch(/Undo is unavailable/);
+    expect(r.snapshotNote).toMatch(/ungenerated chunk column/);
+    expect(await bridge.listSnapshots()).toHaveLength(0);
+    // The message an AI would relay to the user must say plainly that undo is not possible, and why.
+    const formatted = formatApplyResult(r, 'build');
+    expect(formatted).toMatch(/Undo is unavailable/);
+    expect(formatted).not.toMatch(/Snapshot .* taken/);
+  });
+
+  it('captures a partial snapshot when part of the box is ungenerated, reports the gap, and restores what it has', async () => {
+    const serverDir = await fakeServerDir([flatChunk()]);
+    // templateMax 16 lines tiles up with the 16-block chunk grid, so the box below splits
+    // into one tile fully inside the generated chunk (0,0) and one fully inside the
+    // ungenerated chunk (1,0).
+    const bridge = new RconBridge({ rcon, config: testConfig({ serverDir, templateMax: 16 }), now });
+    const set = new VoxelSet();
+    for (let x = 0; x < 32; x++) for (let z = 0; z < 16; z++) set.set(x, 64, z, st('stone'));
+    const r = await bridge.apply(set, { world: overworld, label: 'partial' });
+    expect(r.snapshotId).toBeDefined();
+    expect(r.snapshotNote).toMatch(/only covers part/);
+    expect(r.snapshotNote).toMatch(/1 chunk column/);
+    const snaps = await bridge.listSnapshots();
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0].missingChunks).toBe(1);
+    expect(snaps[0].pieces).toHaveLength(1); // the tile over chunk (1,0) was dropped, not padded with wrong data
+    const formatted = formatApplyResult(r, 'build');
+    expect(formatted).toMatch(new RegExp(`Snapshot ${r.snapshotId} taken`));
+    expect(formatted).toMatch(/only covers part/);
+    // restore() restores what was captured rather than refusing outright.
+    const res = await bridge.restore(r.snapshotId!);
+    expect(res.restored).toBe(1);
+    expect(await bridge.listSnapshots()).toHaveLength(0);
+  });
+
+  it('refuses to restore an empty-piece snapshot record and leaves it in the index instead of silently succeeding', async () => {
+    const serverDir = await fakeServerDir([flatChunk()]);
+    const bridge = new RconBridge({ rcon, config: testConfig({ serverDir }), now });
+    // Simulate a record that predates this fix (or was hand-edited): zero pieces, still indexed.
+    const dir = path.join(serverDir, 'world', 'generated', 'blockwright', 'structure');
+    await fs.mkdir(dir, { recursive: true });
+    const badRecord = {
+      id: 'empty1',
+      world: 'overworld',
+      box: { min: [80, 64, 80], max: [81, 65, 81] },
+      pieces: [],
+      createdAt: new Date(0).toISOString(),
+      missingChunks: 1,
+    };
+    await fs.writeFile(path.join(dir, 'snapshots.json'), JSON.stringify({ snapshots: [badRecord] }, null, 2));
+    await expect(bridge.restore('empty1')).rejects.toThrow(/nothing to restore/);
+    // restore() must not have deleted the one record that would reveal the problem.
+    const snaps = await bridge.listSnapshots();
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0].id).toBe('empty1');
+  });
+});
+
+// Regression tests for defect 2: the snapshot index must survive concurrent read-modify-write
+// without losing a record, and must never be left half-written.
+describe('concurrent snapshots do not lose records', () => {
+  it('keeps both records when two apply() calls race on the same bridge instance', async () => {
+    // Mirrors the reviewer's repro: run two concurrent apply() calls against the same server
+    // directory, repeated, and check that every record survives — not just internals of the
+    // write path.
+    for (let i = 0; i < 5; i++) {
+      fake.commands.length = 0;
+      const serverDir = await fakeServerDir([flatChunk()]);
+      const bridge = new RconBridge({ rcon, config: testConfig({ serverDir }), now });
+      const setA = cubeAt('stone', 0, 0, 0);
+      const setB = cubeAt('dirt', 4, 0, 4);
+      const [rA, rB] = await Promise.all([
+        bridge.apply(setA, { world: overworld, label: `A${i}` }),
+        bridge.apply(setB, { world: overworld, label: `B${i}` }),
+      ]);
+      expect(rA.snapshotId, `iteration ${i}: A should have a snapshotId`).toBeDefined();
+      expect(rB.snapshotId, `iteration ${i}: B should have a snapshotId`).toBeDefined();
+      const snaps = await bridge.listSnapshots();
+      const ids = snaps.map((s) => s.id).sort();
+      expect(ids, `iteration ${i}: both concurrent snapshots must survive in the index`).toEqual([rA.snapshotId, rB.snapshotId].sort());
+    }
+  });
+
+  it('leaves snapshots.json well-formed (no torn/partial write) under concurrent writes', async () => {
+    const serverDir = await fakeServerDir([flatChunk()]);
+    const bridge = new RconBridge({ rcon, config: testConfig({ serverDir }), now });
+    await Promise.all(
+      Array.from({ length: 6 }, (_, i) => bridge.apply(cubeAt('stone', (i % 3) * 2, 0, (i % 3) * 2), { world: overworld, label: `c${i}` })),
+    );
+    const dir = path.join(serverDir, 'world', 'generated', 'blockwright', 'structure');
+    const raw = await fs.readFile(path.join(dir, 'snapshots.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { snapshots: unknown[] };
+    expect(parsed.snapshots).toHaveLength(6);
+    // no leftover temp files from the atomic-rename write
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp'))).toEqual([]);
   });
 });

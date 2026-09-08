@@ -46,6 +46,14 @@ export interface ApplyResult {
   box?: Box;
   elapsedMs: number;
   snapshotId?: string;
+  /**
+   * Set whenever the snapshot picture isn't the simple "undo will fully revert this" case:
+   * either snapshotId is set but the capture was partial (some of the box was ungenerated
+   * terrain and is not covered), or snapshotId is absent because capture was attempted but
+   * came back empty. Always tell the user what this says — it is the difference between
+   * "undo works" and "undo silently does nothing".
+   */
+  snapshotNote?: string;
   /** First commands (or a description) for dry runs and logs. */
   sample: string[];
 }
@@ -70,6 +78,13 @@ export interface SnapshotRecord {
   pieces: Array<{ name: string; origin: Vec3 }>;
   createdAt: string;
   label?: string;
+  /**
+   * Chunk columns inside `box` that were not generated at capture time, and so are not
+   * covered by any piece in `pieces`. Undefined or 0 means the capture was complete; undo
+   * restores the whole box. Greater than 0 means undo will not restore those areas — the
+   * pieces that do exist should still be restored, but the gap must be reported honestly.
+   */
+  missingChunks?: number;
 }
 
 export interface Bridge {

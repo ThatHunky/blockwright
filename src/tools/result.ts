@@ -26,8 +26,16 @@ export function formatApplyResult(r: ApplyResult, what: string): string {
     return lines.join('\n');
   }
   lines.push(`${what}: ${r.blocks} blocks via ${r.method} in ${r.commands} command(s), box ${box}, ${r.elapsedMs} ms.`);
-  if (r.snapshotId) lines.push(`Snapshot ${r.snapshotId} taken; call undo to revert.`);
-  else lines.push('No snapshot taken (world reads unavailable or snapshot=false); undo is not possible for this change.');
+  if (r.snapshotId) {
+    lines.push(`Snapshot ${r.snapshotId} taken; call undo to revert.`);
+    if (r.snapshotNote) lines.push(r.snapshotNote);
+  } else if (r.snapshotNote) {
+    // A snapshot was attempted but came back unusable — say plainly that undo is not
+    // available and why, instead of staying silent about it.
+    lines.push(r.snapshotNote);
+  } else {
+    lines.push('No snapshot taken (world reads unavailable or snapshot=false); undo is not possible for this change.');
+  }
   if (r.failed) lines.push(`${r.failed} command(s) failed:`, ...r.errors.map((e) => `  ${e}`));
   else if (r.errors.length) lines.push('Warnings:', ...r.errors.map((e) => `  ${e}`));
   return lines.join('\n');
