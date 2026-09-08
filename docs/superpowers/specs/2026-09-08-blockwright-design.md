@@ -7,8 +7,10 @@ Date: 2026-09-08. Status: approved for planning.
 An MCP server that lets an AI assistant build real structures on a live
 Minecraft Java server without a modded client and without a bot account.
 It compiles voxel models into console commands, reads and writes schematic
-files, and (with a small optional Paper plugin) reads the world back so the
-assistant can verify what it built and undo mistakes.
+files, reads the world back through structure-block saves so the assistant
+can scout a site and verify what it built, and snapshots every write so it
+can undo mistakes. A small optional Paper plugin adds the same abilities for
+remote servers and faster, physics-free writes.
 
 Primary user: the repo owner running Claude Code against the Matsuri server
 (Paper 26.2, WorldEdit 7.4.5, RCON on localhost). Secondary users: anyone
@@ -18,8 +20,9 @@ with a Paper/Spigot/vanilla server and RCON access.
 
 - Controlling a player or bot (Mineflayer-style). Everything is server-side.
 - Depending on WorldEdit. It is fine if it is present; nothing requires it.
-- Redstone simulation, entity placement, or tile-entity contents (chest
-  items, sign text) in the first release.
+- Redstone simulation, entity placement, or authoring tile-entity contents
+  (chest items, sign text) in the first release. Existing contents are
+  preserved through snapshots and restores.
 - Bedrock-specific concerns. Server-side edits are client-agnostic.
 
 ## Why not an existing project
@@ -41,15 +44,21 @@ Claude ──stdio──▶ blockwright (Node, TypeScript, @modelcontextprotocol
                     ├─ RconBridge  (Tier 1) ──TCP──▶ Paper console
                     │     compiles VoxelSet → /fill, /setblock
                     │     large pastes → structure .nbt in <world>/generated/ → /place template
+                    │     read-back  ← structure block in save mode, triggered by redstone,
+                    │                  writes <world>/generated/blockwright/structures/*.nbt
+                    │     snapshots  = the same save before every write; undo = /place template
                     │
                     └─ PluginBridge (Tier 2) ──HTTP 127.0.0.1──▶ blockwright-plugin.jar
                           bulk set (physics off), read region, snapshot/restore, players
 ```
 
-Tier 1 works on any server with RCON. Tier 2 is used automatically when the
-plugin answers its health check and adds read-back, undo, and faster writes.
-Tools never talk to RCON or HTTP directly; they produce a `VoxelSet` and hand
-it to the active `Bridge`.
+Tier 1 works on any server with RCON. Its read-back, snapshot, and undo
+paths additionally need `BLOCKWRIGHT_SERVER_DIR`, meaning blockwright runs
+on the server host or a shared filesystem; without it those tools report
+"needs server dir or plugin". Tier 2 is used automatically when the plugin
+answers its health check and replaces the structure-block paths with direct
+API calls. Tools never talk to RCON or HTTP directly; they produce a
+`VoxelSet` and hand it to the active `Bridge`.
 
 ### Components
 
@@ -82,9 +91,9 @@ interface Bridge {
   players(): Promise<PlayerInfo[]>;
   runCommand(cmd: string): Promise<string>;
   apply(set: VoxelSet, opts: ApplyOptions): Promise<ApplyResult>;   // write
-  read(region: Box, world: string): Promise<VoxelSet>;               // tier 2 only
-  snapshot(region: Box, world: string): Promise<SnapshotId>;         // tier 2 only
-  restore(id: SnapshotId): Promise<number>;                          // tier 2 only
+  read(region: Box, world: string): Promise<VoxelSet>;               // tier 1 needs server dir
+  snapshot(region: Box, world: string): Promise<SnapshotId>;         // tier 1 needs server dir
+  restore(id: SnapshotId): Promise<number>;                          // tier 1 needs server dir
 }
 ```
 
@@ -161,6 +170,41 @@ Whether `/place template` accepts templates larger than 48³ is unverified;
 the 48 tiling is the safe default and `BLOCKWRIGHT_TEMPLATE_MAX` lets a user
 raise it after testing on their server.
 
+### Reading the world over RCON (needs server dir)
+
+A structure block in `SAVE` mode saves when it receives a redstone signal.
+`RconBridge.read` uses that:
+
+1. Forceload the chunks covering the region.
+2. Tile the region into pieces of at most 48×48×48, the structure block's
+   hard limit on size and offset.
+3. For each piece, find an air position for the structure block: probe
+   candidates with `execute if block x y z air`, starting directly above the
+   piece's min corner and moving up, then trying the other faces. Probe a
+   second air position adjacent to it for the redstone block. Give up after
+   64 probes with an error naming the piece.
+4. `setblock` the structure block with NBT `mode:"SAVE"`, a unique
+   `name:"blockwright:scan_<id>_<n>"`, `posX/posY/posZ` as the piece's offset
+   from the block, `sizeX/sizeY/sizeZ`, `ignoreEntities:1b`. Then `setblock`
+   a `redstone_block` at the second position. The server writes
+   `<serverDir>/<levelName>/generated/blockwright/structures/scan_<id>_<n>.nbt`
+   synchronously.
+5. Set both positions back to `air`, remove the forceload, read and parse
+   the file into a `VoxelSet` at absolute coordinates, delete the file.
+
+A piece therefore costs the probes plus four commands. Players nearby may
+see the two blocks for one tick. Block entities are captured, so signs and
+containers survive a snapshot and restore.
+
+Snapshots use the same save with `snap_` names and are kept, newest 50,
+under the same folder plus an index file `snapshots.json` recording id,
+world, box, and piece names. `restore` runs `place template` for each piece
+at its original min corner, which puts back every block including air.
+
+The NBT field names and the redstone trigger are verified on Matsuri during
+integration; if either fails on a given server version the tools fall back
+to "needs plugin" and the plugin path is unaffected.
+
 ## Schematics
 
 - Read: Sponge `.schem` v2 and v3, vanilla `.nbt` structure. Format is
@@ -192,15 +236,17 @@ raise it after testing on their server.
    levels above a chosen y, and an axis gizmo. The tool result includes the
    path so the assistant can send it to the user. Files are pruned to the
    newest 30.
-3. Tier 2 only, when `context` is set: the surrounding region (default 8
-   blocks around the bounding box) is read from the world and rendered
-   semi-transparent under the planned build so the user sees it in place.
+3. When `context` is set and a read path is available: the surrounding
+   region (default 8 blocks around the bounding box) is read from the world
+   and rendered semi-transparent under the planned build so the user sees
+   it in place.
 
 ## Tools
 
-All write tools accept `dry_run` (compile and preview, touch nothing) and
-`world` (defaults to the overworld; accepts `overworld|nether|end` or a
-Bukkit world name). All return the `ApplyResult` fields listed above.
+All write tools accept `dry_run` (compile and preview, touch nothing),
+`snapshot` (default true when a read path exists), and `world` (defaults to
+the overworld; accepts `overworld|nether|end` or a Bukkit world name). All
+return the `ApplyResult` fields listed above.
 
 | Tool | Tier | Input | Notes |
 |---|---|---|---|
@@ -213,11 +259,14 @@ Bukkit world name). All return the `ApplyResult` fields listed above.
 | `paste_schematic` | 1 | `path`, `origin`, `rotation`, `mirror`, `ignore_air`, `use_offset` | By default `origin` is where the schematic's minimum corner lands. With `use_offset=true` it behaves like WorldEdit's `//paste`: the file's `Offset` is added, so `origin` is the original copy point |
 | `schematic_info` | 1 | `path` | Size, format, palette with counts, offset, DataVersion |
 | `schematic_write` | 1 | build spec or shape, `path`, `format` | Never touches a server |
-| `preview` | 1 (+2) | build spec, shape, or schematic; `context` | See Preview |
-| `read_region` | 2 | `from`, `to` | Palette, RLE data, per-state counts, and a heightmap computed by blockwright from the block data; large regions are summarized unless `full=true` |
-| `get_block` | 2 | `pos` | Single block state |
-| `save_schematic` | 2 | `from`, `to`, `path`, `format` | World region to file |
-| `undo` | 2 | `steps` (default 1) | Restores snapshots newest-first |
+| `preview` | 1 | build spec, shape, or schematic; `context` | See Preview |
+| `read_region` | R | `from`, `to`, `full` | Palette, RLE data, per-state counts, and a heightmap computed by blockwright from the block data; large regions are summarized unless `full=true` |
+| `get_heightmap` | R | `from`, `to` (x/z rectangle), `y_range` | Surface y and surface block per column, as a compact grid; the site-scouting tool |
+| `get_block` | R | `pos` | Single block state |
+| `save_schematic` | R | `from`, `to`, `path`, `format` | World region to file |
+| `undo` | R | `steps` (default 1) | Restores snapshots newest-first |
+
+Tier `R` means read-capable: Tier 1 with `BLOCKWRIGHT_SERVER_DIR`, or Tier 2.
 
 MCP prompts: `build-workflow` (find players → pick site → preview → dry run →
 build → verify → undo if needed). MCP resource: `blockwright://guide/palettes`,
@@ -247,6 +296,10 @@ Configuration is read once at startup; `server_info` shows the effective
 values with the password masked.
 
 ## Paper plugin (Tier 2)
+
+The plugin exists for servers where blockwright cannot reach the world
+folder, and for writes with physics off, no visible structure-block blink,
+and fewer round trips. It is optional everywhere else.
 
 Java 25, plain `javac` via `plugin/build.sh` that downloads the matching
 `paper-api` jar from the PaperMC Maven repository. No Gradle, no external
@@ -307,14 +360,21 @@ Vitest. No test touches a real server unless `BLOCKWRIGHT_INTEGRATION=1`.
 - `schematic/*`: round-trip every fixture through read→write→read and
   compare `VoxelSet`s; a hand-built v2 fixture; a v3 written by WorldEdit
   once the plugin's `save_schematic` produces one on Matsuri.
+- `bridge/rcon-bridge` read path: fake RCON server that answers air probes
+  from a scripted world and writes a fixture `.nbt` into a temp server dir
+  when it sees the redstone `setblock`; asserts the exact command sequence,
+  cleanup of both positions, tiling of a 60×20×60 region into four pieces,
+  and that a failed probe reports the piece.
 - `bridge/plugin-bridge`: fake HTTP server; chunking over 32768, token
   header, 401 handling, snapshot id propagation.
 - `preview`: ASCII output for a known 3×3×3 set; HTML file contains the
   serialized voxel array and no external resource other than the cdnjs
   three.js script.
-- Integration (Matsuri, `BLOCKWRIGHT_INTEGRATION=1`): build a 5×5×5 hollow
-  cube at the demo plot corner `-147, <surface>, 181`, read it back through
-  tier 2, compare, undo, read back again and expect the original.
+- Integration (Matsuri, `BLOCKWRIGHT_INTEGRATION=1`): `get_heightmap` at
+  the demo plot to find the surface, build a 5×5×5 hollow cube at
+  `-147, <surface>, 181`, read it back, compare, undo, read back again and
+  expect the original. Runs over RCON first and again through the plugin
+  once Phase 2 lands.
 
 ## Repository layout and distribution
 
@@ -337,15 +397,17 @@ publish is a follow-up, not part of this spec. Node ≥ 20.
 ## Phasing
 
 1. **Phase 1 — Tier 1 complete.** RCON client, voxel model, compiler,
-   codecs, preview, every Tier 1 tool, README, first push. Verified against
-   Matsuri at the demo plot with `dry_run` first, then a real build, viewed
-   in BlueMap.
+   codecs, preview, structure-block read-back, snapshots and undo, every
+   tool in the table, README, first push. Verified against Matsuri at the
+   demo plot: heightmap, in-place preview, `dry_run`, real build, read-back,
+   undo, viewed in BlueMap.
 2. **Phase 2 — Tier 2.** Plugin, `PluginBridge`, `read_region`, `get_block`,
    `save_schematic`, `undo`, in-place preview context. Installed on Matsuri
    through the existing wait-and-restart script so no player is kicked.
-3. **Stretch (not planned):** RCON-only read-back by placing a structure
-   block in save mode and powering it with a redstone block; Litematica
-   import; sign text and container contents; npm publish.
+3. **Stretch (not planned):** `get_player_target`, a raycast from a
+   player's position and rotation through a freshly read region to answer
+   "build where I am looking"; Litematica import; editing sign text and
+   container contents; npm publish.
 
 ## Demo plot
 
