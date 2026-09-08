@@ -43,6 +43,22 @@ export interface ApplyResult {
   commands: number;
   failed: number;
   errors: string[];
+  /**
+   * Count of commands (fill/setblock, on the commands path) that ran successfully but
+   * changed zero blocks because the target already matched — vanilla reports this as
+   * "No blocks were filled" / "Could not set the block", which looks like failure text but
+   * isn't: it is the normal outcome whenever a build sets a block to what is already there
+   * (air interiors, rebuilding over existing terrain, levelling already-level ground).
+   * Undefined on paths that don't have this concept (structure/none).
+   */
+  noop?: number;
+  /**
+   * Set whenever `noop` is nonzero. Always tell the user: a build that reports success while
+   * quietly changing nothing looks identical to one that worked, so the no-op count needs to
+   * be visible even though it is not a failure — especially when every command was a no-op,
+   * which usually signals a wrong box/origin/dimension rather than a coincidence.
+   */
+  noopNote?: string;
   box?: Box;
   elapsedMs: number;
   snapshotId?: string;

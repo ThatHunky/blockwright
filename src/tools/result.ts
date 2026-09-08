@@ -40,6 +40,10 @@ export function formatApplyResult(r: ApplyResult, what: string): string {
   // A build that looks complete but quietly has empty chests is worse than one that visibly
   // failed, so this is surfaced unconditionally whenever block entities were dropped.
   if (r.blockEntityNote) lines.push(r.blockEntityNote);
+  // Zero-change commands are a normal outcome (see noop on ApplyResult), not a failure, so
+  // this is a neutral note alongside the snapshot/block-entity notes above rather than
+  // anything under "failed" below.
+  if (r.noopNote) lines.push(r.noopNote);
   if (r.failed) lines.push(`${r.failed} command(s) failed:`, ...r.errors.map((e) => `  ${e}`));
   else if (r.errors.length) lines.push('Warnings:', ...r.errors.map((e) => `  ${e}`));
   return lines.join('\n');

@@ -13,8 +13,22 @@ import { readVoxels, readHeightmap, surfaceBlock } from '../world/anvil.js';
 import { BridgeError, BoundsError, NeedsReadError } from './errors.js';
 import type { Bridge, ApplyOptions, ApplyResult, ServerInfo, PlayerInfo, ReadResult, HeightmapResult, SnapshotRecord } from './types.js';
 
+// Matched against raw RCON response text to decide whether a command genuinely failed.
+// Verified against Paper/vanilla's actual lang strings (commands.*, argument.*, parsing.*)
+// rather than guessed, since a false positive here makes blockwright lie about a
+// perfectly normal build and a false negative hides a real problem. Two vanilla messages
+// deliberately do NOT appear here — "No blocks were filled" (commands.fill.failed) and
+// "Could not set the block" (commands.setblock.failed) — because vanilla returns both
+// whenever a fill/setblock is asked to place a block that is already there (see
+// NOOP_RE below), which happens constantly (air interiors, rebuilding over existing
+// terrain, levelling already-level ground) and is not a failure.
 const ERROR_RE =
-  /Incorrect argument|Unknown or incomplete command|not loaded|Too many blocks|Too many chunks|No blocks were filled|Could not set the block|out of this world|no template|Expected |Invalid |Unknown block|Unknown item|Unknown request|That position|Failed/i;
+  /Incorrect argument|Unknown or incomplete command|not loaded|Too many blocks|Too many chunks|out of this world|no template|Expected |Invalid |Unknown block|Unknown item|Unknown request|That position|does not accept|does not have property|can only be set once|Tags aren't allowed|Failed/i;
+
+// A command that ran and legitimately changed zero blocks because the target already
+// matched — not an error, just worth noting so an AI doesn't "fix" a build that isn't
+// broken. See the ERROR_RE comment above for why these two strings live here instead.
+const NOOP_RE = /No blocks were filled|Could not set the block/i;
 const GAMEMODES = ['survival', 'creative', 'adventure', 'spectator'];
 const KEEP_PASTES = 20;
 const KEEP_SNAPSHOTS = 50;
@@ -179,15 +193,32 @@ export class RconBridge implements Bridge {
     return `${count} ${noun} (chest contents, sign text, spawner data, etc.) ${verb} dropped: ${reason}. The blocks themselves were placed, but any chests are empty and any signs are blank.`;
   }
 
+  /**
+   * Builds the note apply() attaches when one or more commands were legitimate no-ops (see
+   * NOOP_RE above). Two shapes: partial (some commands changed nothing — a routine, expected
+   * outcome not worth alarming anyone about) and total (every single command changed
+   * nothing), which is worth surfacing on its own because it usually means the box, origin,
+   * or dimension was wrong rather than that the build coincidentally matched already.
+   */
+  private noopNote(noop: number, total: number): string | undefined {
+    if (!noop) return undefined;
+    if (noop === total) {
+      return `All ${total} command(s) changed nothing: every fill/setblock reported that no blocks changed. This is not a failure, but if you expected new blocks to appear, double-check the box, origin, and dimension — this pattern usually means the build landed somewhere that already matched, or the target area was wrong.`;
+    }
+    const noun = noop === 1 ? 'command' : 'commands';
+    return `${noop} of ${total} ${noun} changed nothing: the blocks there already matched the target (e.g. an air interior that was already air, or ground that was already level). Not counted as a failure.`;
+  }
+
   async applyCommands(commands: string[], box: Box, blocks: number, opts: ApplyOptions): Promise<ApplyResult> {
     const start = this.now();
     this.checkBounds(box);
     const blockEntityNote = this.blockEntityDropNote(opts.blockEntities?.length ?? 0);
     const base = { blocks, commands: commands.length, box, sample: commands.slice(0, 20) };
-    if (opts.dryRun) return { ...base, dryRun: true, method: 'none', failed: 0, errors: [], elapsedMs: 0, blockEntityNote };
+    if (opts.dryRun) return { ...base, dryRun: true, method: 'none', failed: 0, noop: 0, errors: [], elapsedMs: 0, blockEntityNote };
     const errors: string[] = [];
     const { snapshotId, snapshotNote } = await this.maybeSnapshot(box, opts);
     let failed = 0;
+    let noop = 0;
     if (opts.forceload !== false) await this.forceload(box, opts.world, true, errors);
     try {
       for (const cmd of commands) {
@@ -195,13 +226,27 @@ export class RconBridge implements Bridge {
         if (ERROR_RE.test(resp)) {
           failed++;
           if (errors.length < 50) errors.push(`${cmd} → ${resp}`);
+        } else if (NOOP_RE.test(resp)) {
+          noop++;
         }
       }
     } finally {
       this.dirty = true;
       if (opts.forceload !== false) await this.forceload(box, opts.world, false, errors);
     }
-    return { ...base, dryRun: false, method: 'commands', failed, errors, elapsedMs: this.now() - start, snapshotId, snapshotNote, blockEntityNote };
+    return {
+      ...base,
+      dryRun: false,
+      method: 'commands',
+      failed,
+      noop,
+      noopNote: this.noopNote(noop, commands.length),
+      errors,
+      elapsedMs: this.now() - start,
+      snapshotId,
+      snapshotNote,
+      blockEntityNote,
+    };
   }
 
   async apply(set: VoxelSet, opts: ApplyOptions): Promise<ApplyResult> {

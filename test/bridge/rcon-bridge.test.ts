@@ -27,7 +27,11 @@ function vanillaHandler(cmd: string): string {
   if (cmd.endsWith('playerGameType')) return 'Steve has the following entity data: 1';
   if (cmd === 'save-all flush') return 'Saving the game (this may take a moment!)Saved the game';
   if (cmd.startsWith('forceload')) return 'Marked chunk [0, 0] in minecraft:overworld to be force loaded';
+  // Real vanilla no-op: fill/setblock asked to place a block that is already there. Not a
+  // failure — see NOOP_RE in rcon-bridge.ts.
   if (cmd.includes('obsidian')) return 'No blocks were filled';
+  // Real vanilla genuine failure, for tests that need one that is unambiguously an error.
+  if (cmd.includes('bad_block')) return "Unknown block type 'minecraft:bad_block'";
   if (cmd.startsWith('fill') || cmd.startsWith('execute')) return 'Successfully filled 8 blocks';
   if (cmd.startsWith('setblock')) return 'Changed the block at 0, 0, 0';
   if (cmd.startsWith('place template')) return `Loaded template "${cmd.split(' ')[2]}" at 0, 0, 0`;
@@ -76,17 +80,17 @@ describe('info and players', () => {
 });
 
 describe('apply over commands', () => {
-  it('forceloads, runs commands in order, and captures errors', async () => {
+  it('forceloads, runs commands in order, and captures a genuine failure', async () => {
     const bridge = new RconBridge({ rcon, config: testConfig(), now });
     const set = cube('stone');
-    set.set(5, 64, 5, st('obsidian'));
+    set.set(5, 64, 5, st('bad_block'));
     const r = await bridge.apply(set, { world: overworld, snapshot: false });
     expect(fake.commands[0]).toBe('forceload add 0 0 15 15');
     expect(fake.commands[1]).toBe('fill 0 64 0 1 65 1 stone');
-    expect(fake.commands[2]).toBe('setblock 5 64 5 obsidian');
+    expect(fake.commands[2]).toBe('setblock 5 64 5 bad_block');
     expect(fake.commands[3]).toBe('forceload remove 0 0 15 15');
-    expect(r).toMatchObject({ method: 'commands', blocks: 9, commands: 2, failed: 1, dryRun: false });
-    expect(r.errors[0]).toMatch(/obsidian → No blocks were filled/);
+    expect(r).toMatchObject({ method: 'commands', blocks: 9, commands: 2, failed: 1, noop: 0, dryRun: false });
+    expect(r.errors[0]).toMatch(/bad_block → Unknown block type/);
   });
   it('prefixes the dimension and sends nothing on dry run', async () => {
     const bridge = new RconBridge({ rcon, config: testConfig(), now });
@@ -115,6 +119,92 @@ describe('apply over commands', () => {
     await expect(bridge.apply(cube('stone'), { world: overworld, snapshot: false })).rejects.toThrow(/boom/);
     expect(fake.commands[0]).toBe('forceload add 0 0 15 15');
     expect(fake.commands[fake.commands.length - 1]).toBe('forceload remove 0 0 15 15');
+  });
+});
+
+// Regression tests for the defect: RconBridge classified "No blocks were filled" /
+// "Could not set the block" as failures via ERROR_RE, but vanilla returns both whenever a
+// fill/setblock is asked to place a block that is already there — a routine outcome (air
+// interiors, rebuilding over existing terrain, levelling already-level ground), not an
+// error. An AI reading a false "1 command(s) failed" may try to "fix" a build that isn't
+// broken.
+describe('zero-change commands are no-ops, not failures', () => {
+  function hollowCube(shellBlock: string, min: [number, number, number], max: [number, number, number]): VoxelSet {
+    const v = new VoxelSet();
+    for (let x = min[0]; x <= max[0]; x++)
+      for (let y = min[1]; y <= max[1]; y++)
+        for (let z = min[2]; z <= max[2]; z++) {
+          const onShell = x === min[0] || x === max[0] || y === min[1] || y === max[1] || z === min[2] || z === max[2];
+          v.set(x, y, z, st(onShell ? shellBlock : 'air'));
+        }
+    return v;
+  }
+
+  it('a fill returning "No blocks were filled" is not counted as a failure', async () => {
+    const bridge = new RconBridge({ rcon, config: testConfig(), now });
+    const r = await bridge.applyCommands(
+      ['fill 0 64 0 1 64 1 obsidian'],
+      { min: [0, 64, 0], max: [1, 64, 1] },
+      2,
+      { world: overworld, snapshot: false },
+    );
+    expect(r.failed).toBe(0);
+    expect(r.errors).toEqual([]);
+    expect(r.noop).toBe(1);
+    expect(r.noopNote).toMatch(/changed nothing/);
+    const formatted = formatApplyResult(r, 'build');
+    expect(formatted).not.toMatch(/failed/i);
+    expect(formatted).toMatch(/changed nothing/);
+  });
+
+  it('a build where every command is a no-op surfaces that fact', async () => {
+    const bridge = new RconBridge({ rcon, config: testConfig(), now });
+    const r = await bridge.applyCommands(
+      ['fill 0 64 0 1 64 1 obsidian', 'setblock 5 65 5 obsidian'],
+      { min: [0, 64, 0], max: [5, 65, 5] },
+      3,
+      { world: overworld, snapshot: false },
+    );
+    expect(r.failed).toBe(0);
+    expect(r.noop).toBe(2);
+    expect(r.noopNote).toMatch(/All 2 command\(s\) changed nothing/);
+    const formatted = formatApplyResult(r, 'build');
+    expect(formatted).not.toMatch(/failed/i);
+    expect(formatted).toMatch(/All 2 command\(s\) changed nothing/);
+  });
+
+  it('a genuinely failed command is still counted and reported', async () => {
+    const bridge = new RconBridge({ rcon, config: testConfig(), now });
+    const r = await bridge.applyCommands(
+      ['setblock 0 64 0 bad_block'],
+      { min: [0, 64, 0], max: [0, 64, 0] },
+      1,
+      { world: overworld, snapshot: false },
+    );
+    expect(r.failed).toBe(1);
+    expect(r.noop).toBe(0);
+    expect(r.errors[0]).toMatch(/bad_block → Unknown block type/);
+    const formatted = formatApplyResult(r, 'build');
+    expect(formatted).toMatch(/1 command\(s\) failed/);
+  });
+
+  it('the exact real-world scenario: a hollow cube whose interior is already air reports no failures', async () => {
+    const bridge = new RconBridge({ rcon, config: testConfig(), now });
+    // Mirrors the field report: a hollow 5x5x5 cube, box (-147,64,181) to (-143,68,185), with
+    // the 3x3x3 air interior already air on the live server before the build ran.
+    const set = hollowCube('stone_bricks', [-147, 64, 181], [-143, 68, 185]);
+    const base = fake.handler;
+    fake.handler = (cmd) => (cmd.includes(' air') ? 'No blocks were filled' : base(cmd));
+    const r = await bridge.apply(set, { world: overworld, snapshot: false });
+    expect(r.method).toBe('commands');
+    expect(r.blocks).toBe(125);
+    expect(fake.commands).toContain('fill -146 65 182 -144 67 184 air');
+    expect(r.failed).toBe(0);
+    expect(r.errors).toEqual([]);
+    expect(r.noop).toBe(1);
+    const formatted = formatApplyResult(r, 'build');
+    expect(formatted).not.toMatch(/failed/i);
+    expect(formatted).toMatch(/1 of \d+ command changed nothing/);
   });
 });
 
