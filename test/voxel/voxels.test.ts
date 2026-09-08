@@ -31,6 +31,25 @@ describe('BlockState', () => {
     const s = BlockState.parse('oak_stairs[facing=north]').with({ half: 'top' });
     expect(s.toString()).toBe('minecraft:oak_stairs[facing=north,half=top]');
   });
+
+  it('accepts the real Minecraft property grammar: snake_case keys, word or signed-integer values', () => {
+    expect(BlockState.parse('stone[foo_bar=baz_2]').props).toEqual({ foo_bar: 'baz_2' });
+    expect(BlockState.parse('oak_sign[rotation=13]').props).toEqual({ rotation: '13' });
+    expect(BlockState.parse('repeater[delay=-1]').props).toEqual({ delay: '-1' });
+    expect(BlockState.parse('cobblestone_wall[east=none,north=low]').props).toEqual({ east: 'none', north: 'low' });
+  });
+
+  it('rejects block state properties that are not the plain Minecraft grammar', () => {
+    // Reported XSS vector: markup smuggled through a property value.
+    expect(() => BlockState.parse('stone[foo=<img src=x onerror=alert(1)>]')).toThrow(/Invalid block state property/);
+    // Uppercase, whitespace, and punctuation are not valid keys or values.
+    expect(() => BlockState.parse('stone[Facing=north]')).toThrow(/Invalid block state property/);
+    expect(() => BlockState.parse('stone[facing=North]')).toThrow(/Invalid block state property/);
+    expect(() => BlockState.parse('stone[fa cing=north]')).toThrow(/Invalid block state property/);
+    expect(() => BlockState.parse('stone[facing=north-east]')).toThrow(/Invalid block state property/);
+    expect(() => BlockState.parse('stone[facing="north"]')).toThrow(/Invalid block state property/);
+    expect(() => BlockState.parse('stone[on<click>=true]')).toThrow(/Invalid block state property/);
+  });
 });
 
 describe('keys and boxes', () => {

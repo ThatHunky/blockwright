@@ -31,4 +31,12 @@ describe('renderAscii', () => {
     expect((r.text.match(/Layer y=/g) ?? []).length).toBe(4);
     expect(r.text).toContain('26 more layers omitted');
   });
+  it('honestly reports how many extra block types collapse onto "?" beyond the 62 available chars', () => {
+    const v = new VoxelSet();
+    // 65 distinct non-air block states: 62 get their own char, 3 overflow onto '?'.
+    for (let i = 0; i < 65; i++) v.set(i, 0, 0, st(`stone[fake=${i}]`));
+    const r = renderAscii(v);
+    expect(r.legend['?']).toMatch(/^3 further block types/);
+    expect(r.legend['?']).not.toBe('minecraft:stone[fake=62]');
+  });
 });

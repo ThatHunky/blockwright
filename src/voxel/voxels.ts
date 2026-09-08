@@ -47,6 +47,10 @@ export function formatVec(v: Vec3): string {
 
 const NAME_RE = /^[a-z0-9_.\-]+(?::[a-z0-9_.\-/]+)?$/;
 const STATE_RE = /^([^\[\]]+)(?:\[(.*)\])?$/;
+// Minecraft block state property keys are lowercase snake_case identifiers; values are
+// either lowercase snake_case tokens (enum-like: "north", "true") or signed integers.
+const PROP_KEY_RE = /^[a-z0-9_]+$/;
+const PROP_VALUE_RE = /^(?:[a-z0-9_]+|-?[0-9]+)$/;
 const AIR = new Set(['minecraft:air', 'minecraft:cave_air', 'minecraft:void_air']);
 
 export class BlockState {
@@ -70,7 +74,10 @@ export class BlockState {
       for (const pair of m[2].split(',')) {
         const eq = pair.indexOf('=');
         if (eq <= 0 || eq === pair.length - 1) throw new Error(`Invalid block state property in "${text}": "${pair}"`);
-        props[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+        const k = pair.slice(0, eq).trim();
+        const v = pair.slice(eq + 1).trim();
+        if (!PROP_KEY_RE.test(k) || !PROP_VALUE_RE.test(v)) throw new Error(`Invalid block state property in "${text}": "${pair}"`);
+        props[k] = v;
       }
     }
     return new BlockState(m[1], props);
