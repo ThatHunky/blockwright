@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import type { Bridge } from './bridge/types.js';
 import { VERSION } from './version.js';
 import { registerServerTools } from './tools/server-tools.js';
+import { registerBuildTools } from './tools/build-tools.js';
 
 export interface AppContext {
   config: Config;
@@ -16,5 +17,6 @@ Coordinates: x east, y up, z south. Build specs: rows run north→south (z), cha
 export function createServer(ctx: AppContext): McpServer {
   const server = new McpServer({ name: 'blockwright', version: VERSION }, { instructions: INSTRUCTIONS });
   registerServerTools(server, ctx);
+  registerBuildTools(server, ctx);
   return server;
 }
