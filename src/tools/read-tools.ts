@@ -6,7 +6,7 @@ import type { AppContext } from '../server.js';
 import { VoxelSet, box, boxExpand, boxVolume, type Box } from '../voxel/voxels.js';
 import { Vec3Schema, Vec2Schema, RotationSchema, MirrorSchema, WorldSchema } from '../voxel/schemas.js';
 import { buildSpecShape, BuildSpecSchema, buildSpecToVoxels } from '../voxel/spec.js';
-import { shapeShape, ShapeSpecSchema, shapeToVoxels } from '../voxel/shapes.js';
+import { shapeShape, ShapeSpecSchema, shapeToVoxels, DEFAULT_MAX_VOXELS } from '../voxel/shapes.js';
 import { stepsFromDegrees } from '../voxel/rotate.js';
 import { clipboardFromVoxels, clipboardVoxelsAt } from '../schematic/clipboard.js';
 import { loadClipboard, saveClipboard, resolveSchematicPath } from '../schematic/index.js';
@@ -18,13 +18,70 @@ import { ok, json, fail, errorMessage } from './result.js';
 
 const KEEP_PREVIEWS = 30;
 
+/**
+ * Reads must be bounded before the bridge ever touches disk: unlike the generation-side voxel
+ * cap (shapes.ts), which only limits how many voxels get *built*, a world read has no cheap way
+ * to know how big the result will be without first scanning every chunk in the requested box.
+ * So the cap here has to be applied to the requested box/rectangle itself, before calling the
+ * bridge at all.
+ *
+ * We reuse the same knob generation uses (BLOCKWRIGHT_MAX_VOXELS) rather than inventing a
+ * second environment variable — an operator who raises the ceiling for building bigger shapes
+ * likely wants reads to scale too. But the two caps are not the same number:
+ *  - read_region reads and holds the *entire* volume in memory at once (unlike generation,
+ *    which streams into a VoxelSet incrementally and can bail out mid-way), and each voxel can
+ *    carry along block-entity NBT data that a plain generated voxel never has. So its cap is a
+ *    fraction of the generation cap: 20%, i.e. 1,000,000 blocks by default.
+ *  - get_heightmap only samples one y and one surface block id per column, with no block-entity
+ *    data and no full-volume scan, so it can safely use the full generation-level budget as its
+ *    column-count cap: 5,000,000 columns by default (a ~2236x2236 rectangle).
+ */
+export const MAX_VOXELS_ENV_VAR = 'BLOCKWRIGHT_MAX_VOXELS';
+const READ_VOLUME_FRACTION = 0.2;
+
+function resolvedMaxVoxels(): number {
+  const raw = process.env[MAX_VOXELS_ENV_VAR];
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_MAX_VOXELS;
+}
+
+export function maxReadVolume(): number {
+  return Math.max(1, Math.floor(resolvedMaxVoxels() * READ_VOLUME_FRACTION));
+}
+
+export function maxHeightmapArea(): number {
+  return resolvedMaxVoxels();
+}
+
+export const DEFAULT_MAX_READ_VOLUME = Math.floor(DEFAULT_MAX_VOXELS * READ_VOLUME_FRACTION);
+export const DEFAULT_MAX_HEIGHTMAP_AREA = DEFAULT_MAX_VOXELS;
+
 async function writePreview(ctx: AppContext, html: string): Promise<string> {
   await fs.mkdir(ctx.config.previewDir, { recursive: true });
   const file = path.join(ctx.config.previewDir, `preview-${Date.now().toString(36)}.html`);
   await fs.writeFile(file, html);
-  const entries = (await fs.readdir(ctx.config.previewDir)).filter((f) => f.startsWith('preview-')).sort();
-  for (const old of entries.slice(0, Math.max(0, entries.length - KEEP_PREVIEWS))) await fs.rm(path.join(ctx.config.previewDir, old), { force: true });
+  await prunePreviews(ctx);
   return file;
+}
+
+/** Prune old previews by an explicit, reliable ordering key (file modification time) rather
+ * than sorting filenames as strings, which breaks if the naming scheme ever changes shape. */
+async function prunePreviews(ctx: AppContext): Promise<void> {
+  const dir = ctx.config.previewDir;
+  const names = (await fs.readdir(dir)).filter((f) => f.startsWith('preview-') && f.endsWith('.html'));
+  const withMtime = await Promise.all(
+    names.map(async (name) => {
+      const full = path.join(dir, name);
+      const mtimeMs = (await fs.stat(full)).mtimeMs;
+      return { full, mtimeMs };
+    }),
+  );
+  withMtime.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const excess = withMtime.slice(0, Math.max(0, withMtime.length - KEEP_PREVIEWS));
+  for (const { full } of excess) await fs.rm(full, { force: true });
 }
 
 function clampY(b: Box): Box {
@@ -53,9 +110,16 @@ export function registerReadTools(server: McpServer, ctx: AppContext): void {
     async (args) => {
       const given = [args.build, args.shape, args.schematic].filter(Boolean).length;
       if (given !== 1) return fail('preview needs exactly one of "build", "shape" or "schematic"');
+
+      // Everything needed to produce the ASCII output — the primary, model-facing result — is
+      // built here. A failure at any of these steps is a genuine failure: there is nothing
+      // useful to hand back.
+      let set: VoxelSet;
+      let title = args.title ?? 'Blockwright preview';
+      let context: VoxelSet | undefined;
+      let ascii: string;
+      const lines: string[] = [];
       try {
-        let set: VoxelSet;
-        let title = args.title ?? 'Blockwright preview';
         if (args.build) set = buildSpecToVoxels(BuildSpecSchema.parse(args.build));
         else if (args.shape) set = shapeToVoxels(ShapeSpecSchema.parse(args.shape));
         else {
@@ -64,10 +128,8 @@ export function registerReadTools(server: McpServer, ctx: AppContext): void {
           set = clipboardVoxelsAt(clip, s.origin, { useOffset: s.use_offset, rotation: stepsFromDegrees(s.rotation), mirror: s.mirror, ignoreAir: s.ignore_air }).voxels;
           if (!args.title) title = `Preview of ${s.path}`;
         }
-        const lines: string[] = [];
         const issues = validateSet(set);
         if (issues.length) lines.push('Invalid block states (the server would reject these):', ...issues.map((i) => `  ${i.block}: ${i.message}`), '');
-        let context: VoxelSet | undefined;
         if (args.context > 0) {
           if (ctx.bridge.canRead()) {
             const world = resolveWorld(args.world, ctx.config.levelName);
@@ -75,13 +137,23 @@ export function registerReadTools(server: McpServer, ctx: AppContext): void {
             context = (await ctx.bridge.read(around, world)).voxels;
           } else lines.push('(context requested but world reads are unavailable; showing the build alone)', '');
         }
-        lines.push(renderAscii(set, { maxLayers: args.max_layers }).text);
-        const file = await writePreview(ctx, renderHtml(set, { title, context }));
-        lines.push('', `HTML preview written to ${file} — send this file to the user (it opens offline; drag to pan, wheel to zoom, slider to peel layers).`);
-        return ok(lines.join('\n'));
+        ascii = renderAscii(set, { maxLayers: args.max_layers }).text;
       } catch (e) {
         return fail(`preview failed: ${errorMessage(e)}`);
       }
+      lines.push(ascii);
+
+      // The HTML file is a secondary, best-effort artifact. If rendering or writing (or
+      // pruning old previews) it fails, the model still needs the ASCII layers above to check
+      // its own work — so report the HTML failure as a note, not as a tool error that would
+      // throw away everything already produced.
+      try {
+        const file = await writePreview(ctx, renderHtml(set, { title, context }));
+        lines.push('', `HTML preview written to ${file} — send this file to the user (it opens offline; drag to pan, wheel to zoom, slider to peel layers).`);
+      } catch (e) {
+        lines.push('', `HTML preview could not be written: ${errorMessage(e)}. The ASCII layers above are still accurate; only the 3D viewer file is unavailable.`);
+      }
+      return ok(lines.join('\n'));
     },
   );
 
@@ -95,6 +167,14 @@ export function registerReadTools(server: McpServer, ctx: AppContext): void {
     async (args) => {
       try {
         const b = box(args.from, args.to);
+        const volume = boxVolume(b);
+        const cap = maxReadVolume();
+        if (volume > cap) {
+          return fail(
+            `read_region requested ${volume.toLocaleString()} blocks — box (${b.min.join(', ')}) to (${b.max.join(', ')}) — which exceeds the ${cap.toLocaleString()} block read limit. ` +
+              `Reduce the box size, or raise the limit by setting the ${MAX_VOXELS_ENV_VAR} environment variable.`,
+          );
+        }
         const world = resolveWorld(args.world, ctx.config.levelName);
         const r = await ctx.bridge.read(b, world);
         const lines: string[] = [];
@@ -149,6 +229,14 @@ export function registerReadTools(server: McpServer, ctx: AppContext): void {
         const maxX = Math.max(args.from[0], args.to[0]);
         const minZ = Math.min(args.from[1], args.to[1]);
         const maxZ = Math.max(args.from[1], args.to[1]);
+        const area = (maxX - minX + 1) * (maxZ - minZ + 1);
+        const cap = maxHeightmapArea();
+        if (area > cap) {
+          return fail(
+            `get_heightmap requested ${area.toLocaleString()} columns — x ${minX}..${maxX}, z ${minZ}..${maxZ} — which exceeds the ${cap.toLocaleString()} column limit. ` +
+              `Reduce the rectangle, or raise the limit by setting the ${MAX_VOXELS_ENV_VAR} environment variable.`,
+          );
+        }
         const r = await ctx.bridge.heightmap(minX, minZ, maxX, maxZ, world);
         const step = args.sample ?? Math.max(1, Math.ceil(Math.max(maxX - minX + 1, maxZ - minZ + 1) / 48));
         const all = r.heights.flat().filter((h): h is number => h !== null);
@@ -220,19 +308,37 @@ export function registerReadTools(server: McpServer, ctx: AppContext): void {
       inputSchema: { steps: z.number().int().min(1).max(20).default(1), id: z.string().optional() },
     },
     async (args) => {
+      let targets: string[];
       try {
-        const targets = args.id ? [args.id] : (await ctx.bridge.listSnapshots()).slice(0, args.steps).map((s) => s.id);
-        if (!targets.length) return fail('No snapshots available to undo.');
-        const lines: string[] = [];
-        for (const id of targets) {
-          const { record } = await ctx.bridge.restore(id);
-          const gap = record.missingChunks ? ` (${record.missingChunks} chunk column(s) were not generated at capture time and are not restored)` : '';
-          lines.push(`  ${record.id}${record.label ? ` "${record.label}"` : ''}: (${record.box.min.join(', ')}) to (${record.box.max.join(', ')}) in ${record.world}, taken ${record.createdAt}${gap}`);
-        }
-        return ok([`Restored ${targets.length} snapshot(s):`, ...lines].join('\n'));
+        targets = args.id ? [args.id] : (await ctx.bridge.listSnapshots()).slice(0, args.steps).map((s) => s.id);
       } catch (e) {
         return fail(`undo failed: ${errorMessage(e)}`);
       }
+      if (!targets.length) return fail('No snapshots available to undo.');
+
+      // Each restore is independent: if a later one throws after an earlier one already
+      // succeeded (and was removed from the snapshot index by the bridge), that success is
+      // real and must still be reported — a single try/catch around the whole loop would
+      // discard it and misrepresent the world as unchanged.
+      const restored: string[] = [];
+      const failed: string[] = [];
+      for (const id of targets) {
+        try {
+          const { record } = await ctx.bridge.restore(id);
+          const gap = record.missingChunks ? ` (${record.missingChunks} chunk column(s) were not generated at capture time and are not restored)` : '';
+          restored.push(`  ${record.id}${record.label ? ` "${record.label}"` : ''}: (${record.box.min.join(', ')}) to (${record.box.max.join(', ')}) in ${record.world}, taken ${record.createdAt}${gap}`);
+        } catch (e) {
+          failed.push(`  ${id}: ${errorMessage(e)}`);
+        }
+      }
+
+      const lines: string[] = [];
+      if (restored.length) lines.push(`Restored ${restored.length} snapshot(s):`, ...restored);
+      if (failed.length) lines.push(`Failed to restore ${failed.length} snapshot(s):`, ...failed);
+      const text = lines.join('\n');
+      // Only report a total error when nothing at all was restored; a partial success is not
+      // an error the model should retry blindly, it's a mixed outcome it needs to read.
+      return restored.length ? ok(text) : fail(text);
     },
   );
 }
