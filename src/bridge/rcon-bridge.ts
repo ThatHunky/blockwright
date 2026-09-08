@@ -162,11 +162,29 @@ export class RconBridge implements Bridge {
     return { snapshotId: record.id };
   }
 
+  /**
+   * The commands path (fill/setblock) has no way to carry block entity data — it places
+   * blocks only. Whenever this path runs with block entities attached, they are dropped, and
+   * that must never happen quietly: this builds the note that says how many were lost and
+   * why, in the same plain register as the snapshot notes above.
+   */
+  private blockEntityDropNote(count: number): string | undefined {
+    if (!count) return undefined;
+    const noun = count === 1 ? 'block entity' : 'block entities';
+    const verb = count === 1 ? 'was' : 'were';
+    const reason =
+      this.config.serverDir === undefined
+        ? 'no server directory is configured (BLOCKWRIGHT_SERVER_DIR), so the structure-template path that can preserve them is unavailable'
+        : 'this write went through the commands path, which cannot carry block entity data';
+    return `${count} ${noun} (chest contents, sign text, spawner data, etc.) ${verb} dropped: ${reason}. The blocks themselves were placed, but any chests are empty and any signs are blank.`;
+  }
+
   async applyCommands(commands: string[], box: Box, blocks: number, opts: ApplyOptions): Promise<ApplyResult> {
     const start = this.now();
     this.checkBounds(box);
+    const blockEntityNote = this.blockEntityDropNote(opts.blockEntities?.length ?? 0);
     const base = { blocks, commands: commands.length, box, sample: commands.slice(0, 20) };
-    if (opts.dryRun) return { ...base, dryRun: true, method: 'none', failed: 0, errors: [], elapsedMs: 0 };
+    if (opts.dryRun) return { ...base, dryRun: true, method: 'none', failed: 0, errors: [], elapsedMs: 0, blockEntityNote };
     const errors: string[] = [];
     const { snapshotId, snapshotNote } = await this.maybeSnapshot(box, opts);
     let failed = 0;
@@ -183,7 +201,7 @@ export class RconBridge implements Bridge {
       this.dirty = true;
       if (opts.forceload !== false) await this.forceload(box, opts.world, false, errors);
     }
-    return { ...base, dryRun: false, method: 'commands', failed, errors, elapsedMs: this.now() - start, snapshotId, snapshotNote };
+    return { ...base, dryRun: false, method: 'commands', failed, errors, elapsedMs: this.now() - start, snapshotId, snapshotNote, blockEntityNote };
   }
 
   async apply(set: VoxelSet, opts: ApplyOptions): Promise<ApplyResult> {
@@ -191,19 +209,29 @@ export class RconBridge implements Bridge {
     if (!box) throw new BridgeError('nothing to place: the voxel set is empty');
     this.checkBounds(box);
     const commands = compile(set, { fillLimit: this.config.fillLimit, dimension: opts.world.dimension });
-    const useStructure = commands.length > this.config.structureThreshold && this.config.serverDir !== undefined;
+    const blockEntityCount = opts.blockEntities?.length ?? 0;
+    const overThreshold = commands.length > this.config.structureThreshold;
+    // Prefer the structure path whenever block entities are present and the server directory
+    // needed to write template files is configured, regardless of the command-count
+    // threshold: that path is the only one that preserves chest contents, sign text, etc.,
+    // and preserving data is worth the extra file-write overhead the threshold exists to
+    // avoid. Below the threshold with no block entities, keep using commands as before.
+    const useStructure = this.config.serverDir !== undefined && (overThreshold || blockEntityCount > 0);
     if (!useStructure) return this.applyCommands(commands.map((c) => c.text), box, set.size, opts);
-    return this.applyStructure(set, box, commands.length, opts);
+    const reason = overThreshold
+      ? `${commands.length} fill/setblock commands exceed BLOCKWRIGHT_STRUCTURE_THRESHOLD`
+      : `this write carries ${blockEntityCount} block ${blockEntityCount === 1 ? 'entity' : 'entities'} (chest contents, sign text, etc.), which only the structure-template path can preserve`;
+    return this.applyStructure(set, box, opts, reason);
   }
 
-  private async applyStructure(set: VoxelSet, box: Box, commandCount: number, opts: ApplyOptions): Promise<ApplyResult> {
+  private async applyStructure(set: VoxelSet, box: Box, opts: ApplyOptions, reason: string): Promise<ApplyResult> {
     const start = this.now();
     const tiles = tileBox(box, this.config.templateMax).filter((t) => set.within(t).size > 0);
     const base = {
       blocks: set.size,
       commands: tiles.length,
       box,
-      sample: [`${commandCount} fill/setblock commands exceed BLOCKWRIGHT_STRUCTURE_THRESHOLD; placing ${tiles.length} structure template(s) instead`],
+      sample: [`${reason}; placing ${tiles.length} structure template(s) instead`],
     };
     if (opts.dryRun) return { ...base, dryRun: true, method: 'structure', failed: 0, errors: [], elapsedMs: 0 };
     const errors: string[] = [];

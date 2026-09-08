@@ -86,6 +86,7 @@ Every write tool accepts `dry_run`, `snapshot`, `label`, `world` and `allow_unkn
 - Nothing is written without a compiled command list; `dry_run` shows it.
 - `BLOCKWRIGHT_BOUNDS` fences the assistant into an area.
 - Snapshots are on by default whenever reads are available.
+- Running two blockwright processes against the same server directory at once can lose a snapshot record (each process only serializes writes to `snapshots.json` against itself, not against the other). Don't rely on undo in that configuration — run one blockwright process per server directory.
 - `run_command` refuses administrative commands unless you opt in.
 - The RCON password never appears in tool output.
 

@@ -23,6 +23,7 @@ export function formatApplyResult(r: ApplyResult, what: string): string {
   if (r.dryRun) {
     lines.push(`DRY RUN — nothing was changed. ${what}: ${r.blocks} blocks in ${r.commands} command(s), box ${box}.`);
     if (r.sample.length) lines.push('First commands:', ...r.sample.map((s) => `  ${s}`));
+    if (r.blockEntityNote) lines.push(r.blockEntityNote);
     return lines.join('\n');
   }
   lines.push(`${what}: ${r.blocks} blocks via ${r.method} in ${r.commands} command(s), box ${box}, ${r.elapsedMs} ms.`);
@@ -36,6 +37,9 @@ export function formatApplyResult(r: ApplyResult, what: string): string {
   } else {
     lines.push('No snapshot taken (world reads unavailable or snapshot=false); undo is not possible for this change.');
   }
+  // A build that looks complete but quietly has empty chests is worse than one that visibly
+  // failed, so this is surfaced unconditionally whenever block entities were dropped.
+  if (r.blockEntityNote) lines.push(r.blockEntityNote);
   if (r.failed) lines.push(`${r.failed} command(s) failed:`, ...r.errors.map((e) => `  ${e}`));
   else if (r.errors.length) lines.push('Warnings:', ...r.errors.map((e) => `  ${e}`));
   return lines.join('\n');

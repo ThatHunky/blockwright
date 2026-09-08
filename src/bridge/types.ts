@@ -54,6 +54,14 @@ export interface ApplyResult {
    * "undo works" and "undo silently does nothing".
    */
   snapshotNote?: string;
+  /**
+   * Set whenever this write carried block entities (chest contents, sign text, spawner
+   * data, ...) that were NOT placed — the commands path (fill/setblock) has no way to carry
+   * that data, so if the structure-template path wasn't available or wasn't used, those
+   * block entities were dropped. Always tell the user: a build that looks complete but has
+   * empty chests is worse than one that visibly failed.
+   */
+  blockEntityNote?: string;
   /** First commands (or a description) for dry runs and logs. */
   sample: string[];
 }

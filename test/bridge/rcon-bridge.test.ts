@@ -11,6 +11,9 @@ import { FakeRcon } from '../helpers/fake-rcon.js';
 import { testConfig } from '../helpers/config.js';
 import { fakeServerDir, flatChunk } from '../helpers/server-dir.js';
 import { formatApplyResult } from '../../src/tools/result.js';
+import type { BlockEntity } from '../../src/schematic/clipboard.js';
+import { readStructure } from '../../src/schematic/structure.js';
+import { parseNbt, T } from '../../src/nbt/nbt.js';
 
 const st = (s: string) => BlockState.parse(s);
 const UUID = '11111111-2222-3333-4444-555555555555';
@@ -126,6 +129,60 @@ describe('structure path', () => {
     const place = fake.commands.find((c) => c.startsWith('place template'))!;
     expect(place).toMatch(/^place template blockwright:paste_\w+_0 0 64 0$/);
     expect(r).toMatchObject({ method: 'structure', failed: 0, commands: 1, blocks: 8 });
+  });
+});
+
+// Regression tests for the defect: applyCommands ignored opts.blockEntities entirely, so
+// pastes with chest contents/sign text/spawner data going through the commands path (the
+// common case — below structureThreshold) placed them empty/blank with no warning at all.
+describe('block entities are never silently dropped', () => {
+  const chestEntity = (pos: [number, number, number]): BlockEntity => ({
+    pos,
+    id: 'minecraft:chest',
+    data: { CustomName: T.string('"Loot Chest"') },
+  });
+
+  it('prefers the structure path and preserves block entities even well below the command threshold', async () => {
+    const serverDir = await fakeServerDir([flatChunk()]);
+    // structureThreshold defaults to 400 (see testConfig); cube('chest') compiles to a single
+    // fill command, nowhere near it. The structure path must still be chosen because block
+    // entities are present and a server dir is configured.
+    const bridge = new RconBridge({ rcon, config: testConfig({ serverDir }), now });
+    const set = cube('chest');
+    const r = await bridge.apply(set, { world: overworld, snapshot: false, blockEntities: [chestEntity([0, 64, 0])] });
+    expect(r.method).toBe('structure');
+    expect(r.blockEntityNote).toBeUndefined();
+    const dir = path.join(serverDir, 'world', 'generated', 'blockwright', 'structure');
+    const files = readdirSync(dir).filter((f) => f.startsWith('paste_'));
+    expect(files).toHaveLength(1);
+    const clip = readStructure(await parseNbt(await fs.readFile(path.join(dir, files[0]))));
+    expect(clip.blockEntities).toHaveLength(1);
+    expect(clip.blockEntities[0].id).toBe('minecraft:chest');
+    const formatted = formatApplyResult(r, 'paste');
+    expect(formatted).not.toMatch(/dropped/);
+  });
+
+  it('reports the loss in the result and formatted output when no server dir is configured (structure path unavailable)', async () => {
+    const bridge = new RconBridge({ rcon, config: testConfig(), now }); // no serverDir
+    const r = await bridge.apply(cube('chest'), { world: overworld, snapshot: false, blockEntities: [chestEntity([0, 64, 0])] });
+    expect(r.method).toBe('commands');
+    expect(r.blockEntityNote).toBeDefined();
+    expect(r.blockEntityNote).toMatch(/1 block entity/);
+    expect(r.blockEntityNote).toMatch(/dropped/);
+    expect(r.blockEntityNote).toMatch(/BLOCKWRIGHT_SERVER_DIR/);
+    const formatted = formatApplyResult(r, 'paste');
+    expect(formatted).toMatch(/dropped/);
+    expect(formatted).toMatch(/BLOCKWRIGHT_SERVER_DIR/);
+  });
+
+  it('leaves an ordinary paste with no block entities exactly as before: no note, and still the commands path below the threshold', async () => {
+    const serverDir = await fakeServerDir([flatChunk()]);
+    const bridge = new RconBridge({ rcon, config: testConfig({ serverDir }), now });
+    const r = await bridge.apply(cube('stone'), { world: overworld, snapshot: false });
+    expect(r.method).toBe('commands');
+    expect(r.blockEntityNote).toBeUndefined();
+    const formatted = formatApplyResult(r, 'paste');
+    expect(formatted).not.toMatch(/dropped/);
   });
 });
 
