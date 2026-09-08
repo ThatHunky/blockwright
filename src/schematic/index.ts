@@ -1,4 +1,4 @@
-import { promises as fs, existsSync } from 'node:fs';
+import { promises as fs, existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { parseNbt, writeNbtGz, type NbtRoot, type CompoundValue } from '../nbt/nbt.js';
 import type { Clipboard } from './clipboard.js';
@@ -38,12 +38,56 @@ export async function saveClipboard(
 
 const READ_EXTS = ['.schem', '.nbt', '.schematic'];
 
-/** Absolute path for a user-supplied schematic name. For reads, probes known extensions. */
+/**
+ * Resolves the real (symlink-free) path of the longest existing ancestor of `p`, then
+ * reappends the non-existent tail. This lets us compare "where does this path actually
+ * point" for containment checks even when the final file doesn't exist yet (writes), while
+ * still catching a symlinked intermediate directory that would otherwise escape unnoticed.
+ */
+function resolveRealish(p: string): string {
+  let dir = p;
+  const tail: string[] = [];
+  while (!existsSync(dir)) {
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached filesystem root without finding an existing ancestor
+    tail.unshift(path.basename(dir));
+    dir = parent;
+  }
+  const real = existsSync(dir) ? realpathSync(dir) : dir;
+  return tail.length ? path.join(real, ...tail) : real;
+}
+
+/**
+ * Absolute path for a user-supplied schematic name. For reads, probes known extensions.
+ *
+ * Absolute input paths are a deliberate feature and are returned as-is (aside from
+ * extension probing). Relative input must stay inside `schematicDir` — this is enforced
+ * against the *real* (symlink-resolved) path, and via path.relative rather than a string
+ * prefix check, so a sibling directory that merely shares a name prefix (e.g.
+ * "schematics-other" next to "schematics") is not mistaken for being contained.
+ */
 export function resolveSchematicPath(input: string, schematicDir: string, forWrite = false): string {
-  const p = path.isAbsolute(input) ? input : path.join(schematicDir, input);
+  const absolute = path.isAbsolute(input);
+  let p = absolute ? input : path.join(schematicDir, input);
   if (path.extname(p) === '') {
-    if (forWrite) return `${p}.schem`;
-    for (const ext of READ_EXTS) if (existsSync(p + ext)) return p + ext;
+    if (forWrite) {
+      p = `${p}.schem`;
+    } else {
+      for (const ext of READ_EXTS) {
+        if (existsSync(p + ext)) {
+          p = p + ext;
+          break;
+        }
+      }
+    }
+  }
+  if (!absolute) {
+    const resolvedDir = existsSync(schematicDir) ? realpathSync(schematicDir) : path.resolve(schematicDir);
+    const resolvedPath = resolveRealish(p);
+    const rel = path.relative(resolvedDir, resolvedPath);
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      throw new Error(`schematic path "${input}" escapes schematic directory "${schematicDir}"`);
+    }
   }
   return p;
 }

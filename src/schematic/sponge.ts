@@ -9,6 +9,10 @@ export function decodeVarints(data: number[], expected: number): number[] {
     let value = 0;
     let shift = 0;
     for (;;) {
+      // Without this check, reading past the end of `data` yields `undefined`, which
+      // coerces to 0 and can be mistaken for a valid terminating byte, silently decoding
+      // truncated data as (likely-air) palette index 0 instead of failing loudly.
+      if (i >= data.length) throw new Error('sponge: truncated varint data');
       const b = data[i++] & 0xff;
       value |= (b & 0x7f) << shift;
       if ((b & 0x80) === 0) break;

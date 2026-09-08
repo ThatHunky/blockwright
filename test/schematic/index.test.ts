@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { BlockState, VoxelSet } from '../../src/voxel/voxels.js';
@@ -43,5 +43,54 @@ describe('format detection and IO', () => {
     expect(resolveSchematicPath('house.schem', dir)).toBe(path.join(dir, 'house.schem'));
     expect(resolveSchematicPath('/abs/x.nbt', dir)).toBe('/abs/x.nbt');
     expect(resolveSchematicPath('new', dir, true)).toBe(path.join(dir, 'new.schem'));
+  });
+
+  describe('containment', () => {
+    it('rejects a relative read path that escapes the schematic directory', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'bw-'));
+      expect(() => resolveSchematicPath('../../../etc/passwd', dir)).toThrow(/escapes schematic directory/);
+      expect(() => resolveSchematicPath('..', dir)).toThrow(/escapes schematic directory/);
+    });
+
+    it('rejects a relative write path that escapes the schematic directory', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'bw-'));
+      expect(() => resolveSchematicPath('../evil', dir, true)).toThrow(/escapes schematic directory/);
+    });
+
+    it('is not fooled by a sibling directory that is a string prefix of the schematic dir name', async () => {
+      const parent = await mkdtemp(path.join(tmpdir(), 'bw-'));
+      const dir = path.join(parent, 'schematics');
+      const sibling = path.join(parent, 'schematics-other');
+      await mkdir(dir, { recursive: true });
+      await mkdir(sibling, { recursive: true });
+      await writeFile(path.join(sibling, 'secret.schem'), 'nope');
+      expect(() => resolveSchematicPath('../schematics-other/secret.schem', dir)).toThrow(/escapes schematic directory/);
+    });
+
+    it('allows a legitimate nested relative path, including into a not-yet-created subdirectory', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'bw-'));
+      await mkdir(path.join(dir, 'sub'), { recursive: true });
+      await saveClipboard(sample(), path.join(dir, 'sub', 'nested.schem'));
+      expect(resolveSchematicPath('sub/nested', dir)).toBe(path.join(dir, 'sub', 'nested.schem'));
+      expect(resolveSchematicPath('sub/nested.schem', dir)).toBe(path.join(dir, 'sub', 'nested.schem'));
+      // "brandnew" subdirectory does not exist yet; the containment check must still work
+      // by walking up to the nearest existing ancestor rather than requiring the target exist.
+      expect(resolveSchematicPath('brandnew/house', dir, true)).toBe(path.join(dir, 'brandnew', 'house.schem'));
+    });
+
+    it('still resolves absolute paths untouched, bypassing the containment check', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'bw-'));
+      expect(resolveSchematicPath('/etc/passwd', dir)).toBe('/etc/passwd');
+      expect(resolveSchematicPath('/abs/new', dir, true)).toBe('/abs/new.schem');
+    });
+
+    it('rejects an escape hidden behind a symlink inside the schematic directory', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'bw-'));
+      const outside = await mkdtemp(path.join(tmpdir(), 'bw-outside-'));
+      await writeFile(path.join(outside, 'secret.schem'), 'top secret');
+      await symlink(outside, path.join(dir, 'link'));
+      expect(() => resolveSchematicPath('link/secret', dir)).toThrow(/escapes schematic directory/);
+      expect(() => resolveSchematicPath('link/secret.schem', dir, true)).toThrow(/escapes schematic directory/);
+    });
   });
 });

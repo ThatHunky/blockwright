@@ -12,6 +12,23 @@ describe('varints', () => {
     expect(bytes.length).toBe(1 + 1 + 1 + 2 + 2);
     expect(decodeVarints(bytes, 5)).toEqual([0, 1, 127, 128, 300]);
   });
+
+  it('throws on data truncated mid-varint instead of decoding the missing byte as 0', () => {
+    // 300 needs two bytes; the first byte has its continuation bit set. Chopping it off
+    // there used to let `data[i++]` read past the end, get `undefined`, coerce to 0, and
+    // be mistaken for a valid terminating byte -- silently decoding as a wrong (often air)
+    // block instead of failing.
+    const full = encodeVarints([1, 300]);
+    const truncated = full.slice(0, full.length - 1);
+    expect(() => decodeVarints(truncated, 2)).toThrow(/truncated varint/);
+  });
+
+  it('throws on data truncated to nothing mid-varint', () => {
+    const full = encodeVarints([300]);
+    expect(full.length).toBeGreaterThan(1);
+    const truncated = full.slice(0, 1); // only the continuation byte, no terminator
+    expect(() => decodeVarints(truncated, 1)).toThrow(/truncated varint/);
+  });
 });
 
 describe('sponge v2', () => {
