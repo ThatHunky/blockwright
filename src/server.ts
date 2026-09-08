@@ -5,6 +5,7 @@ import { VERSION } from './version.js';
 import { registerServerTools } from './tools/server-tools.js';
 import { registerBuildTools } from './tools/build-tools.js';
 import { registerReadTools } from './tools/read-tools.js';
+import { registerPrompts } from './tools/prompts.js';
 
 export interface AppContext {
   config: Config;
@@ -20,5 +21,6 @@ export function createServer(ctx: AppContext): McpServer {
   registerServerTools(server, ctx);
   registerBuildTools(server, ctx);
   registerReadTools(server, ctx);
+  registerPrompts(server, ctx);
   return server;
 }

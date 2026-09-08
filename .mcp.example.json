@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "blockwright": {
+      "command": "node",
+      "args": ["/home/thathunky/repos/blockwright/dist/index.js"],
+      "env": {
+        "BLOCKWRIGHT_SERVER_DIR": "/home/thathunky/games/servers/matsuri",
+        "BLOCKWRIGHT_PREVIEW_DIR": "/home/thathunky/repos/blockwright/.blockwright-previews"
+      }
+    }
+  }
+}
