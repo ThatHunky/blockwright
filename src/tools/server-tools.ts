@@ -8,11 +8,111 @@ import { splitBox, prefixDimension } from '../voxel/compile.js';
 import { ok, json, fail, errorMessage, formatApplyResult } from './result.js';
 import { writeOptionsShape, applyOptionsFrom, validationError } from './common.js';
 
-const DENIED =
-  /^\/?\s*(minecraft:)?(stop|restart|op|deop|ban|ban-ip|banlist|pardon|pardon-ip|whitelist|kick|save-off|reload|rl|bukkit:reload|paper:reload)\b|\brun\s+(minecraft:)?(stop|restart|op|deop|ban|ban-ip|pardon|pardon-ip|whitelist|kick|save-off|reload)\b/i;
+// Administrative command names, checked against the first token of a command once it has
+// been fully normalised (namespace stripped, `execute ... run` peeled away). Auditable at a
+// glance: if it isn't in this set, it isn't refused as "administrative".
+const DENIED_COMMANDS = new Set([
+  'stop',
+  'restart',
+  'op',
+  'deop',
+  'ban',
+  'ban-ip',
+  'banlist',
+  'pardon',
+  'pardon-ip',
+  'whitelist',
+  'kick',
+  'save-off',
+  'reload',
+  'rl',
+]);
+
+/** A command string must never contain these — they let one line of input smuggle a second command. */
+function hasControlChars(command: string): boolean {
+  return /[\n\r\0]/.test(command);
+}
+
+/**
+ * Reduce a raw command to a normalised form suitable for token comparison: leading
+ * whitespace/slashes stripped (in any interleaving, e.g. "/ /stop" or "//stop"), internal
+ * whitespace (including unicode whitespace) collapsed to single spaces, a stray trailing
+ * slash removed, and lowercased.
+ */
+function normalizeCommand(command: string): string {
+  return command
+    .replace(/^[\s/]+/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\/+$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Repeatedly strip a leading `execute ... run ` clause, so nested execute chains
+ * (`execute as @a run execute as @b run stop`) reduce to the command actually run.
+ * Only unwraps when the command's first token is literally "execute" and a standalone
+ * "run" token follows, so a command that merely mentions "run" as an argument elsewhere
+ * (and isn't an execute chain to begin with) is left untouched.
+ */
+function peelExecuteRun(command: string): string {
+  let rest = command;
+  for (;;) {
+    const tokens = rest.split(' ');
+    if (tokens[0] !== 'execute') return rest;
+    const runIndex = tokens.indexOf('run');
+    if (runIndex === -1) return rest;
+    rest = tokens.slice(runIndex + 1).join(' ');
+  }
+}
+
+/** Strip every leading `namespace:` segment (minecraft:, bukkit:, paper:, ... repeated) from a token. */
+function stripNamespacePrefixes(token: string): string {
+  let t = token;
+  for (;;) {
+    const m = /^[a-z0-9_.-]+:(.+)$/.exec(t);
+    if (!m) return t;
+    t = m[1];
+  }
+}
 
 export function isDenied(command: string): boolean {
-  return DENIED.test(command.trim());
+  if (hasControlChars(command)) return true;
+  const normalized = normalizeCommand(command);
+  if (normalized === '') return false;
+  const reduced = peelExecuteRun(normalized);
+  const firstToken = reduced.split(' ')[0] ?? '';
+  if (firstToken === '') return false;
+  const bare = stripNamespacePrefixes(firstToken);
+  return DENIED_COMMANDS.has(bare);
+}
+
+// Minecraft block-state grammar, mirrored from BlockState.parse so replace_filter gets the
+// same treatment as block: a bare name, optionally namespaced, with optional [prop=value,...]
+// state brackets, or the same shape prefixed with "#" for a block tag (e.g. "#minecraft:logs").
+const REPLACE_FILTER_NAME_RE = /^[a-z0-9_.-]+(?::[a-z0-9_./-]+)?$/;
+const REPLACE_FILTER_STATE_RE = /^([^[\]]+)(?:\[(.*)])?$/;
+const REPLACE_FILTER_PROP_KEY_RE = /^[a-z0-9_]+$/;
+const REPLACE_FILTER_PROP_VALUE_RE = /^(?:[a-z0-9_]+|-?[0-9]+)$/;
+
+/** Returns an error message if `text` isn't a valid replace_filter (block state or #tag), otherwise undefined. */
+export function validateReplaceFilter(text: string): string | undefined {
+  if (/\s/.test(text)) return `invalid replace_filter "${text}": must not contain whitespace`;
+  const isTag = text.startsWith('#');
+  const body = isTag ? text.slice(1) : text;
+  if (body === '') return `invalid replace_filter "${text}": empty`;
+  const m = REPLACE_FILTER_STATE_RE.exec(body.toLowerCase());
+  if (!m || !REPLACE_FILTER_NAME_RE.test(m[1])) return `invalid replace_filter "${text}": expected a block state or a #tag`;
+  if (m[2] !== undefined && m[2].trim() !== '') {
+    for (const pair of m[2].split(',')) {
+      const eq = pair.indexOf('=');
+      if (eq <= 0 || eq === pair.length - 1) return `invalid replace_filter "${text}": bad property "${pair}"`;
+      const k = pair.slice(0, eq).trim();
+      const v = pair.slice(eq + 1).trim();
+      if (!REPLACE_FILTER_PROP_KEY_RE.test(k) || !REPLACE_FILTER_PROP_VALUE_RE.test(v)) return `invalid replace_filter "${text}": bad property "${pair}"`;
+    }
+  }
+  return undefined;
 }
 
 export function registerServerTools(server: McpServer, ctx: AppContext): void {
@@ -48,6 +148,7 @@ export function registerServerTools(server: McpServer, ctx: AppContext): void {
       inputSchema: { command: z.string().describe('Command without a leading slash, e.g. "time set day"') },
     },
     async ({ command }) => {
+      if (hasControlChars(command)) return fail(`refused: "${command}" contains a newline, carriage return, or null character, which is never valid in a single console command.`);
       if (!ctx.config.allowAdmin && isDenied(command)) return fail(`refused: "${command}" is an administrative command. Set BLOCKWRIGHT_ALLOW_ADMIN=1 to allow it.`);
       try {
         const out = await ctx.bridge.runCommand(command);
@@ -79,9 +180,13 @@ export function registerServerTools(server: McpServer, ctx: AppContext): void {
       } catch (e) {
         return fail(errorMessage(e));
       }
-      const b = box(args.from, args.to);
-      const opts = applyOptionsFrom(args, ctx);
+      if (args.replace_filter !== undefined) {
+        const err = validateReplaceFilter(args.replace_filter);
+        if (err) return fail(err);
+      }
       try {
+        const b = box(args.from, args.to);
+        const opts = applyOptionsFrom(args, ctx);
         if (args.mode === 'hollow' || args.mode === 'outline') {
           const set = new VoxelSet();
           const air = BlockState.parse('air');

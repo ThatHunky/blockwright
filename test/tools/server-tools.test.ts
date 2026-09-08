@@ -3,7 +3,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { connect, call } from '../helpers/mcp.js';
 import { FakeBridge } from '../helpers/fake-bridge.js';
 import { testConfig } from '../helpers/config.js';
-import { isDenied } from '../../src/tools/server-tools.js';
+import { isDenied, validateReplaceFilter } from '../../src/tools/server-tools.js';
 
 let bridge: FakeBridge;
 let client: Client;
@@ -35,6 +35,31 @@ describe('run_command', () => {
     for (const c of ['stop', '/op steve', 'minecraft:ban x', 'execute as @a run kick @s', 'whitelist off', 'reload']) expect(isDenied(c), c).toBe(true);
     for (const c of ['time set day', 'say hi', 'fill 0 0 0 1 1 1 stone', 'execute as @a run tp @s 0 64 0']) expect(isDenied(c), c).toBe(false);
   });
+
+  it('denies the doubled-leading-slash bypass (defect 1)', () => {
+    for (const c of ['//stop', '///op steve', '/ /stop']) expect(isDenied(c), c).toBe(true);
+  });
+
+  it('denies admin names reached via execute ... run (defect 2)', () => {
+    for (const c of ['execute as @a run rl', 'execute as @a run bukkit:reload', 'execute as @a run paper:reload confirm', 'execute as @a run banlist']) {
+      expect(isDenied(c), c).toBe(true);
+    }
+  });
+
+  it('denies nested execute ... run chains', () => {
+    expect(isDenied('execute as @a run execute as @b run stop')).toBe(true);
+  });
+
+  it('denies commands with a newline, carriage return, or null byte anywhere in the string', () => {
+    for (const c of ['time set day\nstop', 'time set day\rstop', 'time\0stop', 'stop\n']) expect(isDenied(c), JSON.stringify(c)).toBe(true);
+  });
+
+  it('still allows legitimate commands after normalisation', () => {
+    for (const c of ['time set day', 'say hi', 'tp @s 0 64 0', 'fill 0 0 0 1 1 1 stone', 'execute as @a run tp @s 0 64 0']) {
+      expect(isDenied(c), c).toBe(false);
+    }
+  });
+
   it('passes safe commands to the bridge and refuses others', async () => {
     const ok = await call(client, 'run_command', { command: 'time set day' });
     expect(ok.isError).toBe(false);
@@ -43,6 +68,50 @@ describe('run_command', () => {
     expect(bad.isError).toBe(true);
     expect(bad.text).toMatch(/refused/);
     expect(bridge.calls.filter((c) => c.method === 'runCommand')).toHaveLength(1);
+  });
+
+  it('refuses a command containing a newline before it ever reaches the bridge', async () => {
+    const r = await call(client, 'run_command', { command: 'time set day\nstop' });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/refused/);
+    expect(bridge.calls.filter((c) => c.method === 'runCommand')).toHaveLength(0);
+  });
+
+  it('self-bypass attempts against isDenied all still get caught', () => {
+    const bypassAttempts = [
+      '//stop',
+      '///op steve',
+      '/ /stop',
+      '\t/stop',
+      '/\t/stop',
+      'STOP',
+      'Op steve',
+      'minecraft:minecraft:stop',
+      'minecraft:bukkit:paper:reload',
+      'execute as @a run execute as @b run execute as @c run op steve',
+      'op\tsteve',
+      'op steve',
+      '  stop',
+      'stop  ',
+    ];
+    for (const c of bypassAttempts) expect(isDenied(c), JSON.stringify(c)).toBe(true);
+  });
+});
+
+describe('validateReplaceFilter', () => {
+  it('rejects extra tokens smuggled through replace_filter (defect 3)', () => {
+    expect(validateReplaceFilter('dirt extra_token')).toMatch(/invalid replace_filter/);
+  });
+  it('rejects other whitespace and empty values', () => {
+    expect(validateReplaceFilter('dirt\tstop')).toMatch(/invalid replace_filter/);
+    expect(validateReplaceFilter('')).toMatch(/invalid replace_filter/);
+    expect(validateReplaceFilter('#')).toMatch(/invalid replace_filter/);
+  });
+  it('accepts a plain block name, a namespaced name, a state, and a block tag', () => {
+    expect(validateReplaceFilter('dirt')).toBeUndefined();
+    expect(validateReplaceFilter('minecraft:dirt')).toBeUndefined();
+    expect(validateReplaceFilter('oak_log[axis=y]')).toBeUndefined();
+    expect(validateReplaceFilter('#minecraft:logs')).toBeUndefined();
   });
 });
 
