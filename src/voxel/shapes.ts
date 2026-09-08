@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { BlockState, VoxelSet, type Vec3 } from './voxels.js';
 import { Vec3Schema } from './schemas.js';
+import { DEFAULT_MAX_VOXELS, maxVoxels, voxelCapMessage } from './voxel-cap.js';
+
+// Re-exported for existing callers (e.g. src/tools/read-tools.ts) that import the cap from here.
+export { DEFAULT_MAX_VOXELS };
 
 /** Sanity caps on individual dimensions; the real guard against runaway allocations is the
  * voxel-count check in shapeToVoxels (BLOCKWRIGHT_MAX_VOXELS), since these can still combine
@@ -29,19 +33,6 @@ export const ShapeSpecSchema = z.object(shapeShape);
 export type ShapeSpec = z.infer<typeof ShapeSpecSchema>;
 
 export class ShapeError extends Error {}
-
-/** Fallback voxel-count cap, overridable via BLOCKWRIGHT_MAX_VOXELS. */
-export const DEFAULT_MAX_VOXELS = 5_000_000;
-const MAX_VOXELS_ENV_VAR = 'BLOCKWRIGHT_MAX_VOXELS';
-
-function maxVoxels(): number {
-  const raw = process.env[MAX_VOXELS_ENV_VAR];
-  if (raw) {
-    const n = Number(raw);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return DEFAULT_MAX_VOXELS;
-}
 
 /** Rough upper-bound estimate of how many voxels a spec would produce, computed without
  * generating anything, so it can reject an oversized request before doing any real work. */
@@ -129,10 +120,7 @@ export function shapeToVoxels(spec: ShapeSpec): VoxelSet {
   const cap = maxVoxels();
   const estimate = estimateVoxels(spec);
   if (estimate > cap) {
-    throw new ShapeError(
-      `${spec.shape} would produce approximately ${estimate.toLocaleString()} voxels, which exceeds the ${cap.toLocaleString()} voxel limit. ` +
-        `Reduce its size, or raise the limit by setting the ${MAX_VOXELS_ENV_VAR} environment variable.`,
-    );
+    throw new ShapeError(voxelCapMessage(spec.shape, estimate, cap));
   }
   const block = BlockState.parse(spec.block);
   const out = new VoxelSet();
@@ -140,10 +128,7 @@ export function shapeToVoxels(spec: ShapeSpec): VoxelSet {
   const put = (x: number, y: number, z: number) => {
     count++;
     if (count > cap) {
-      throw new ShapeError(
-        `${spec.shape} would produce more than ${cap.toLocaleString()} voxels, exceeding the ${cap.toLocaleString()} voxel limit. ` +
-          `Reduce its size, or raise the limit by setting the ${MAX_VOXELS_ENV_VAR} environment variable.`,
-      );
+      throw new ShapeError(voxelCapMessage(spec.shape, 'running', cap));
     }
     out.set(x, y, z, block);
   };
