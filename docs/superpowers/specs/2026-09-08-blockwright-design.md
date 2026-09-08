@@ -7,7 +7,7 @@ Date: 2026-09-08. Status: approved for planning.
 An MCP server that lets an AI assistant build real structures on a live
 Minecraft Java server without a modded client and without a bot account.
 It compiles voxel models into console commands, reads and writes schematic
-files, reads the world back through structure-block saves so the assistant
+files, reads the world back from the server's region files so the assistant
 can scout a site and verify what it built, and snapshots every write so it
 can undo mistakes. A small optional Paper plugin adds the same abilities for
 remote servers and faster, physics-free writes.
@@ -44,9 +44,8 @@ Claude ──stdio──▶ blockwright (Node, TypeScript, @modelcontextprotocol
                     ├─ RconBridge  (Tier 1) ──TCP──▶ Paper console
                     │     compiles VoxelSet → /fill, /setblock
                     │     large pastes → structure .nbt in <world>/generated/ → /place template
-                    │     read-back  ← structure block in save mode, triggered by redstone,
-                    │                  writes <world>/generated/blockwright/structures/*.nbt
-                    │     snapshots  = the same save before every write; undo = /place template
+                    │     read-back  ← `save-all flush`, then parse <world>/.../region/*.mca
+                    │     snapshots  = read the box, write it as structure .nbt; undo = /place template
                     │
                     └─ PluginBridge (Tier 2) ──HTTP 127.0.0.1──▶ blockwright-plugin.jar
                           bulk set (physics off), read region, snapshot/restore, players
@@ -158,9 +157,10 @@ that fails to remove is reported in the result, never silently kept.
 When a `VoxelSet` compiles to more than `structureThreshold` commands
 (default 400) and `BLOCKWRIGHT_SERVER_DIR` is set, `RconBridge` writes the set
 as vanilla structure files under
-`<serverDir>/<levelName>/generated/blockwright/structures/<id>_<n>.nbt`,
-tiled into 48×48×48 pieces, and runs `place template blockwright:<id>_<n> x y z`
-for each. The `generated` folder is read on demand by the server, so no
+`<serverDir>/<levelName>/generated/blockwright/structure/<id>_<n>.nbt`
+(the folder is `structure`, singular, verified on Paper 26.2), tiled into
+48×48×48 pieces, and runs `place template blockwright:<id>_<n> x y z` for
+each. The `generated` folder is read on demand by the server, so no
 `/reload` is required. Names are unique per paste (timestamp + hash) because
 loaded templates are cached; the bridge deletes files older than the newest
 20. Rotation and mirror are applied in the voxel domain first, so the
@@ -172,38 +172,43 @@ raise it after testing on their server.
 
 ### Reading the world over RCON (needs server dir)
 
-A structure block in `SAVE` mode saves when it receives a redstone signal.
-`RconBridge.read` uses that:
+Console commands cannot report a block's state, so `RconBridge.read` goes
+to the world files:
 
-1. Forceload the chunks covering the region.
-2. Tile the region into pieces of at most 48×48×48, the structure block's
-   hard limit on size and offset.
-3. For each piece, find an air position for the structure block: probe
-   candidates with `execute if block x y z air`, starting directly above the
-   piece's min corner and moving up, then trying the other faces. Probe a
-   second air position adjacent to it for the redstone block. Give up after
-   64 probes with an error naming the piece.
-4. `setblock` the structure block with NBT `mode:"SAVE"`, a unique
-   `name:"blockwright:scan_<id>_<n>"`, `posX/posY/posZ` as the piece's offset
-   from the block, `sizeX/sizeY/sizeZ`, `ignoreEntities:1b`. Then `setblock`
-   a `redstone_block` at the second position. The server writes
-   `<serverDir>/<levelName>/generated/blockwright/structures/scan_<id>_<n>.nbt`
-   synchronously.
-5. Set both positions back to `air`, remove the forceload, read and parse
-   the file into a `VoxelSet` at absolute coordinates, delete the file.
+1. Run `save-all flush` unless blockwright has not written since the last
+   save and that save is under 30 seconds old. Loaded chunks are flushed to
+   disk; unloaded chunks are already current. Measured at about 0.8 s on
+   Matsuri with two players online.
+2. Locate the region directory for the dimension. Two layouts are
+   supported and detected by existence: Minecraft 26.x
+   `<world>/dimensions/minecraft/<overworld|the_nether|the_end>/region/`,
+   and the older Bukkit layout `<world>/region/`, `<world>_nether/DIM-1/region/`,
+   `<world>_the_end/DIM1/region/`.
+3. For each chunk touching the box, read the 4 KB offset table of
+   `r.<rx>.<rz>.mca`, inflate the chunk (zlib, gzip, or raw), and decode
+   `sections[].block_states` (palette plus packed longs, entry width
+   `max(4, ceil(log2(palette length)))`, no entries straddling longs) and
+   `block_entities`. `Heightmaps.MOTION_BLOCKING` and `WORLD_SURFACE` are
+   decoded the same way at 9 bits per entry for `get_heightmap`, so a
+   heightmap never touches block data.
 
-A piece therefore costs the probes plus four commands. Players nearby may
-see the two blocks for one tick. Block entities are captured, so signs and
-containers survive a snapshot and restore.
+The decoder was checked against Matsuri (DataVersion 4903): three blocks
+compared with `execute if block`, all matching, and the heightmap gave the
+surface at the demo plot as y=63.
 
-Snapshots use the same save with `snap_` names and are kept, newest 50,
-under the same folder plus an index file `snapshots.json` recording id,
-world, box, and piece names. `restore` runs `place template` for each piece
-at its original min corner, which puts back every block including air.
+Snapshots reuse this: before a write, `RconBridge.snapshot` reads the
+bounding box and writes it as one or more 48³ structure files named
+`snap_<id>_<n>.nbt` in the generated folder, with block entities carried
+through, plus an index `snapshots.json` (id, world, box, piece names,
+timestamp) in the same folder. `restore` runs `place template` for each
+piece at its original min corner, which puts back every block including
+air. Snapshots survive server restarts because they live on disk; the
+newest 50 are kept.
 
-The NBT field names and the redstone trigger are verified on Matsuri during
-integration; if either fails on a given server version the tools fall back
-to "needs plugin" and the plugin path is unaffected.
+A redstone-triggered structure block save was also verified on Matsuri as a
+way to snapshot without a `save-all`, but it only stores the template in
+memory (lost on restart) and needs two temporary blocks placed in the
+world. It is not used; it remains an option for a future fast-snapshot mode.
 
 ## Schematics
 
@@ -360,11 +365,15 @@ Vitest. No test touches a real server unless `BLOCKWRIGHT_INTEGRATION=1`.
 - `schematic/*`: round-trip every fixture through read→write→read and
   compare `VoxelSet`s; a hand-built v2 fixture; a v3 written by WorldEdit
   once the plugin's `save_schematic` produces one on Matsuri.
-- `bridge/rcon-bridge` read path: fake RCON server that answers air probes
-  from a scripted world and writes a fixture `.nbt` into a temp server dir
-  when it sees the redstone `setblock`; asserts the exact command sequence,
-  cleanup of both positions, tiling of a 60×20×60 region into four pieces,
-  and that a failed probe reports the piece.
+- `world/anvil`: a region file built in the test from a hand-made chunk
+  (two sections, palette of three states, one block entity, heightmaps)
+  decodes to the expected blocks and surface heights; missing chunk returns
+  undefined; both directory layouts resolve.
+- `bridge/rcon-bridge` read path: fake RCON server records `save-all flush`,
+  a temp server dir holds the test region file; asserts the save is skipped
+  when nothing was written in the last 30 s, snapshots produce tiled
+  structure files and an index entry, and `restore` issues one
+  `place template` per piece.
 - `bridge/plugin-bridge`: fake HTTP server; chunking over 32768, token
   header, 401 handling, snapshot id propagation.
 - `preview`: ASCII output for a known 3×3×3 set; HTML file contains the
