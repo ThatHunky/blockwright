@@ -4,6 +4,7 @@ import type { Bridge } from './bridge/types.js';
 import { VERSION } from './version.js';
 import { registerServerTools } from './tools/server-tools.js';
 import { registerBuildTools } from './tools/build-tools.js';
+import { registerReadTools } from './tools/read-tools.js';
 
 export interface AppContext {
   config: Config;
@@ -18,5 +19,6 @@ export function createServer(ctx: AppContext): McpServer {
   const server = new McpServer({ name: 'blockwright', version: VERSION }, { instructions: INSTRUCTIONS });
   registerServerTools(server, ctx);
   registerBuildTools(server, ctx);
+  registerReadTools(server, ctx);
   return server;
 }
