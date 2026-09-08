@@ -28,7 +28,7 @@ describe('buildSpecToVoxels', () => {
     expect(v.get(0, 1, 0)?.toString()).toBe('minecraft:lantern[hanging=true]');
   });
   it('reports unknown characters with their position', () => {
-    expect(() => parse({ origin: [0, 0, 0], palette: { '#': 'stone' }, layers: [{ y: 0, rows: ['#', '#Q'] }] })).toThrow(
+    expect(() => parse({ origin: [0, 0, 0], palette: { '#': 'stone' }, layers: [{ y: 0, rows: ['# ', '#Q'] }] })).toThrow(
       /layer 0 row 1 col 1: character "Q"/,
     );
   });
@@ -41,6 +41,18 @@ describe('buildSpecToVoxels', () => {
     expect(v.bounds()).toEqual({ min: [10, 0, 10], max: [10, 0, 13] });
     // the stairs block was at x=0 (west end); after clockwise rotation it is at the north end
     expect(v.get(10, 0, 10)?.props.facing).toBe('east');
+  });
+  it('rejects a layer with ragged rows', () => {
+    expect(() => parse({ origin: [0, 0, 0], palette: { '#': 'stone' }, layers: [{ y: 0, rows: ['##', '#'] }] })).toThrow(
+      /layer 0: rows must have equal length \(expected 2, row 1 has length 1\)/,
+    );
+    expect(() => parse({ origin: [0, 0, 0], palette: { '#': 'stone' }, layers: [{ y: 0, rows: ['##', '#'] }] })).toThrow(BuildSpecError);
+  });
+  it('accepts a layer whose short rows are padded with trailing spaces', () => {
+    const v = parse({ origin: [0, 0, 0], palette: { '#': 'stone' }, layers: [{ y: 0, rows: ['##', '# '] }] });
+    expect(v.size).toBe(3);
+    expect(v.get(0, 0, 1)?.toCommand()).toBe('stone');
+    expect(v.get(1, 0, 1)).toBeUndefined();
   });
   it('applies defaults through the schema', () => {
     const s = BuildSpecSchema.parse({ origin: [0, 0, 0], layers: [{ y: 0, rows: ['#'] }], palette: { '#': 'dirt' } });

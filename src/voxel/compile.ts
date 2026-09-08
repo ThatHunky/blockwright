@@ -32,7 +32,7 @@ const ATTACHABLE = new RegExp(
       '.*_bed', '.*_sapling', 'dandelion', 'poppy', 'blue_orchid', 'allium', 'azure_bluet', '.*_tulip', 'oxeye_daisy',
       'cornflower', 'lily_of_the_valley', 'wither_rose', 'torchflower', 'pitcher_plant', 'sunflower', 'lilac',
       'rose_bush', 'peony', 'short_grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'seagrass',
-      'tall_seagrass', 'kelp', 'kelp_plant', 'lily_pad', '.*coral.*', 'candle', '.*_candle', '.*_candle_cake',
+      'tall_seagrass', 'kelp', 'kelp_plant', 'lily_pad', '.*_coral_fan', '.*_coral_wall_fan', '.*_coral', 'candle', '.*_candle', '.*_candle_cake',
       'chain', 'bell', 'flower_pot', 'potted_.*', 'wheat', 'carrots', 'potatoes', 'beetroots', 'melon_stem',
       'pumpkin_stem', 'attached_.*', 'sugar_cane', 'bamboo', 'bamboo_sapling', 'cactus', 'nether_wart', 'cocoa',
       'sweet_berry_bush', 'cave_vines', 'cave_vines_plant', 'weeping_vines', 'weeping_vines_plant',

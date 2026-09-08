@@ -36,4 +36,42 @@ describe('shapes', () => {
     expect(() => gen({ shape: 'sphere', radius: 2, block: 'stone' })).toThrow(/sphere needs center/);
     expect(() => gen({ shape: 'cylinder', base: [0, 0, 0], radius: 2, block: 'stone' })).toThrow(/cylinder needs height/);
   });
+  it('bounds shape dimensions in the schema so an AI caller cannot request an unbounded allocation', () => {
+    expect(() => ShapeSpecSchema.parse({ shape: 'sphere', center: [0, 0, 0], radius: 5000, block: 'stone' })).toThrow();
+    expect(() => ShapeSpecSchema.parse({ shape: 'pyramid', base: [0, 0, 0], size: 100000, block: 'stone' })).toThrow();
+    expect(() => ShapeSpecSchema.parse({ shape: 'cylinder', base: [0, 0, 0], radius: 2, height: 1000000, block: 'stone' })).toThrow();
+    expect(() => ShapeSpecSchema.parse({ shape: 'sphere', center: [0, 0, 0], radius: 2, block: 'stone', thickness: 999999, hollow: true })).toThrow();
+    // still within bounds
+    expect(() => ShapeSpecSchema.parse({ shape: 'sphere', center: [0, 0, 0], radius: 256, block: 'stone' })).not.toThrow();
+  });
+  it('rejects a shape whose voxel count would exceed the cap, naming the size, cap and env var', () => {
+    // radius at the schema max on all axes produces ~70M voxels, well past the 5,000,000 default cap
+    expect(() => gen({ shape: 'sphere', center: [0, 0, 0], radius: 256, block: 'stone' })).toThrow(ShapeError);
+    let threw = false;
+    try {
+      gen({ shape: 'sphere', center: [0, 0, 0], radius: 256, block: 'stone' });
+    } catch (e) {
+      threw = true;
+      const msg = (e as Error).message;
+      expect(msg).toMatch(/70,6\d\d,\d\d\d voxels/);
+      expect(msg).toMatch(/5,000,000 voxel limit/);
+      expect(msg).toMatch(/BLOCKWRIGHT_MAX_VOXELS/);
+    }
+    expect(threw).toBe(true);
+  });
+  it('honours BLOCKWRIGHT_MAX_VOXELS to raise or lower the cap', () => {
+    const prev = process.env.BLOCKWRIGHT_MAX_VOXELS;
+    try {
+      process.env.BLOCKWRIGHT_MAX_VOXELS = '10';
+      expect(() => gen({ shape: 'sphere', center: [0, 0, 0], radius: 2, block: 'stone' })).toThrow(/10 voxel limit/);
+      // a straight line of 2,000,001 voxels exceeds a 1,000,000 cap but fits comfortably once raised to 3,000,000
+      process.env.BLOCKWRIGHT_MAX_VOXELS = '1000000';
+      expect(() => gen({ shape: 'line', from: [0, 0, 0], to: [2000000, 0, 0], block: 'stone' })).toThrow(/1,000,000 voxel limit/);
+      process.env.BLOCKWRIGHT_MAX_VOXELS = '3000000';
+      expect(() => gen({ shape: 'line', from: [0, 0, 0], to: [2000000, 0, 0], block: 'stone' })).not.toThrow();
+    } finally {
+      if (prev === undefined) delete process.env.BLOCKWRIGHT_MAX_VOXELS;
+      else process.env.BLOCKWRIGHT_MAX_VOXELS = prev;
+    }
+  });
 });

@@ -15,7 +15,13 @@ export const buildSpecShape = {
         y: z
           .union([z.number().int(), z.tuple([z.number().int(), z.number().int()])])
           .describe('Height above origin, or an inclusive [from, to] range that repeats the rows'),
-        rows: z.array(z.string()).min(1).describe('Rows run north→south (z), characters run west→east (x)'),
+        rows: z
+          .array(z.string())
+          .min(1)
+          .describe(
+            'Rows run north→south (z), characters run west→east (x). All rows within a layer must have the same length — ' +
+              'pad shorter rows with trailing spaces (a space always means "leave the world alone", so padding is safe).',
+          ),
       }),
     )
     .default([]),
@@ -51,6 +57,12 @@ export function buildSpecToRelativeVoxels(spec: BuildSpec): VoxelSet {
   }
   const rel = new VoxelSet();
   spec.layers.forEach((layer, li) => {
+    const expectedLen = layer.rows[0].length;
+    layer.rows.forEach((row, z) => {
+      if (row.length !== expectedLen) {
+        throw new BuildSpecError(`layer ${li}: rows must have equal length (expected ${expectedLen}, row ${z} has length ${row.length})`);
+      }
+    });
     const ys = Array.isArray(layer.y) ? range(layer.y[0], layer.y[1]) : [layer.y];
     layer.rows.forEach((row, z) => {
       [...row].forEach((ch, x) => {

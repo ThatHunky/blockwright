@@ -13,9 +13,15 @@ describe('validateState', () => {
   });
   it('rejects bad names, properties and values', () => {
     expect(validateState(st('stoen'))?.message).toMatch(/unknown block "stoen"/);
+    expect(validateState(st('stoen'))?.message).toMatch(/allow_unknown_blocks: true/);
     expect(validateState(st('oak_stairs[facing=up]'))?.message).toMatch(/facing.*north/);
     expect(validateState(st('oak_stairs[color=red]'))?.message).toMatch(/no property "color"/);
     expect(validateState(st('oak_stairs[waterlogged=maybe]'))?.message).toMatch(/true or false/);
+  });
+  it('range-checks int properties against the block definition, not just their shape', () => {
+    expect(validateState(st('oak_sign[rotation=13]'))).toBeUndefined();
+    expect(validateState(st('oak_sign[rotation=99]'))?.message).toMatch(/rotation.*between 0 and 15.*got 99/);
+    expect(validateState(st('oak_sign[rotation=-1]'))?.message).toMatch(/rotation.*between 0 and 15.*got -1/);
   });
   it('validates a set and suggests names', () => {
     const v = new VoxelSet();

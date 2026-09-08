@@ -58,6 +58,12 @@ describe('compile', () => {
       expect(isAttachable(st(n)), n).toBe(false);
     expect(isAttachable(st('oak_trapdoor'))).toBe(true);
   });
+  it('does not classify solid coral blocks as attachable, but does classify coral fans and loose corals', () => {
+    for (const n of ['tube_coral_block', 'dead_brain_coral_block', 'brain_coral_block', 'fire_coral_block'])
+      expect(isAttachable(st(n)), n).toBe(false);
+    for (const n of ['tube_coral_fan', 'dead_tube_coral_wall_fan', 'brain_coral', 'dead_horn_coral', 'fire_coral_wall_fan'])
+      expect(isAttachable(st(n)), n).toBe(true);
+  });
   it('prefixes non-overworld dimensions', () => {
     expect(prefixDimension('fill 0 0 0 1 1 1 stone', 'minecraft:the_nether')).toBe('execute in minecraft:the_nether run fill 0 0 0 1 1 1 stone');
     expect(prefixDimension('fill 0 0 0 1 1 1 stone', 'minecraft:overworld')).toBe('fill 0 0 0 1 1 1 stone');

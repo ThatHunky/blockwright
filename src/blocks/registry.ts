@@ -28,14 +28,23 @@ export function validateState(state: BlockState): ValidationIssue | undefined {
     if (p.type === 'bool' && v !== 'true' && v !== 'false') return { block: state.toString(), message: `property "${k}" of "${short}" must be true or false` };
     if ((p.type === 'enum' || p.type === 'direction') && p.values && !p.values.map(String).includes(v))
       return { block: state.toString(), message: `property "${k}" of "${short}" must be one of ${p.values.join(', ')}` };
-    if (p.type === 'int' && !/^-?\d+$/.test(v)) return { block: state.toString(), message: `property "${k}" of "${short}" must be an integer` };
+    if (p.type === 'int') {
+      if (!/^-?\d+$/.test(v)) return { block: state.toString(), message: `property "${k}" of "${short}" must be an integer` };
+      if (p.values && !p.values.map(String).includes(v)) {
+        const nums = p.values.map(Number);
+        const lo = Math.min(...nums);
+        const hi = Math.max(...nums);
+        return { block: state.toString(), message: `property "${k}" of "${short}" must be between ${lo} and ${hi} (got ${v})` };
+      }
+    }
   }
   return undefined;
 }
 
 function hint(name: string): string {
   const s = suggestBlocks(name);
-  return s.length ? ` (did you mean ${s.slice(0, 3).join(', ')}?)` : '';
+  const did = s.length ? `did you mean ${s.slice(0, 3).join(', ')}? ` : '';
+  return ` (${did}if this is a newer block not yet in the bundled registry, pass allow_unknown_blocks: true)`;
 }
 
 /** One issue per distinct invalid state. */
