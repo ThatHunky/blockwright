@@ -50,12 +50,81 @@ describe('run_command', () => {
     expect(isDenied('execute as @a run execute as @b run stop')).toBe(true);
   });
 
+  it('denies the "run"-as-argument-value bypass (defect 1 regression)', () => {
+    // A prior fix located the execute/run separator with tokens.indexOf('run'), which finds
+    // the first token literally equal to "run" rather than the grammatical separator. Several
+    // execute subcommands take a free-form name that can itself be "run" — most importantly a
+    // scoreboard fake-player holder for `execute store result score <targets> <objective> run
+    // <command>`, which need not be a real or online player. These are all real bypasses a
+    // Paper server would execute.
+    for (const c of [
+      'execute store result score run objRun run stop',
+      'execute as run run stop',
+      'execute at run run stop',
+    ]) {
+      expect(isDenied(c), c).toBe(true);
+    }
+  });
+
+  it('accepts the documented trade-off: a "run"-adjacent argument that happens to be a denied name still gets refused even when the real command is harmless', () => {
+    // execute store result score <targets> <objective> run <command>: here "stop" is the
+    // *objective name*, not the command, but the chosen rule (candidate = token after every
+    // "run") can't tell the difference without parsing execute's grammar, so it over-blocks.
+    // This is intentional — see the comment on commandStartIndices — and is covered here so a
+    // future change doesn't accidentally "fix" it back into the defect-1 hole.
+    expect(isDenied('execute store result score run stop run tp @s 0 0 0')).toBe(true);
+  });
+
+  it('denies permission-plugin commands (defect 2): a model must not be able to grant itself operator via lp/pex/etc', () => {
+    for (const c of [
+      'lp user Steve permission set minecraft.command.op true',
+      'LP user Steve permission set minecraft.command.op true',
+      'luckperms user Steve parent add admin',
+      'pex user Steve add *',
+      'perm user Steve add *',
+      'perms user Steve add *',
+      'permission user Steve add *',
+      'permissions user Steve add *',
+      'execute as @a run lp user Steve permission set minecraft.command.op true',
+      'minecraft:lp user Steve permission set minecraft.command.op true',
+    ]) {
+      expect(isDenied(c), c).toBe(true);
+    }
+  });
+
+  it('denies WorldGuard region deletion but allows its read-only/self-scoped subcommands', () => {
+    for (const c of ['region delete spawn', 'region del spawn', 'region remove spawn', 'region rem spawn', 'rg delete spawn', 'rg del spawn']) {
+      expect(isDenied(c), c).toBe(true);
+    }
+    for (const c of ['region info spawn', 'region list', 'region flag spawn build allow', 'region claim myplot', 'region select myplot', 'rg info spawn', 'rg list']) {
+      expect(isDenied(c), c).toBe(false);
+    }
+  });
+
+  it('denies HuskClaims admin/bypass/mass-delete commands but allows self-scoped claim commands', () => {
+    for (const c of ['adminclaim', 'adminclaim 20', 'ignoreclaims', 'unclaimall', 'unclaimall confirm', 'abandonallclaims', 'huskclaims reload']) {
+      expect(isDenied(c), c).toBe(true);
+    }
+    for (const c of ['claim', 'claim 20', 'unclaim', 'trust Steve', 'claimlist']) {
+      expect(isDenied(c), c).toBe(false);
+    }
+  });
+
   it('denies commands with a newline, carriage return, or null byte anywhere in the string', () => {
     for (const c of ['time set day\nstop', 'time set day\rstop', 'time\0stop', 'stop\n']) expect(isDenied(c), JSON.stringify(c)).toBe(true);
   });
 
   it('still allows legitimate commands after normalisation', () => {
     for (const c of ['time set day', 'say hi', 'tp @s 0 64 0', 'fill 0 0 0 1 1 1 stone', 'execute as @a run tp @s 0 64 0']) {
+      expect(isDenied(c), c).toBe(false);
+    }
+  });
+
+  it('allows "run" as an ordinary chat word, including next to words that are themselves denied names, outside of execute', () => {
+    // The chosen rule only treats a token after "run" as a candidate command inside an
+    // `execute` invocation. A plain chat message is never re-interpreted as a command chain,
+    // which is what keeps ordinary things like "say stop" from being falsely refused.
+    for (const c of ['say stop', 'say run stop', 'say please run and hide', 'say lp is a great abbreviation']) {
       expect(isDenied(c), c).toBe(false);
     }
   });
@@ -106,6 +175,11 @@ describe('validateReplaceFilter', () => {
     expect(validateReplaceFilter('dirt\tstop')).toMatch(/invalid replace_filter/);
     expect(validateReplaceFilter('')).toMatch(/invalid replace_filter/);
     expect(validateReplaceFilter('#')).toMatch(/invalid replace_filter/);
+  });
+  it('rejects an embedded null character and other control characters (non-blocking fix)', () => {
+    expect(validateReplaceFilter('dirt\0stop')).toMatch(/invalid replace_filter/);
+    expect(validateReplaceFilter('dirt\x01')).toMatch(/invalid replace_filter/);
+    expect(validateReplaceFilter('dirt\x7f')).toMatch(/invalid replace_filter/);
   });
   it('accepts a plain block name, a namespaced name, a state, and a block tag', () => {
     expect(validateReplaceFilter('dirt')).toBeUndefined();

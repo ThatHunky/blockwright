@@ -8,10 +8,17 @@ import { splitBox, prefixDimension } from '../voxel/compile.js';
 import { ok, json, fail, errorMessage, formatApplyResult } from './result.js';
 import { writeOptionsShape, applyOptionsFrom, validationError } from './common.js';
 
-// Administrative command names, checked against the first token of a command once it has
-// been fully normalised (namespace stripped, `execute ... run` peeled away). Auditable at a
-// glance: if it isn't in this set, it isn't refused as "administrative".
+// Administrative command names, checked (namespace stripped) against every position in a
+// normalised command where a command name could start — see commandStartIndices below.
+// Auditable at a glance: if it isn't in this set (or DENIED_SUBCOMMANDS below), it isn't
+// refused as "administrative".
+//
+// IMPORTANT: this is a safety net against an AI agent making a destructive mistake, not a
+// security boundary against a determined attacker — an attacker with the ability to choose
+// `run_command`'s argument can reach RCON in plenty of other ways this file cannot stop.
+// Setting BLOCKWRIGHT_ALLOW_ADMIN=1 disables this entire check.
 const DENIED_COMMANDS = new Set([
+  // --- vanilla / Bukkit server administration ---
   'stop',
   'restart',
   'op',
@@ -26,6 +33,51 @@ const DENIED_COMMANDS = new Set([
   'save-off',
   'reload',
   'rl',
+
+  // --- permission plugins (LuckPerms + the older PermissionsEx-family aliases some admins
+  // still run): blocked entirely, not just their "grant" subcommands. The whole point of
+  // catching `op` above is defeated if a model can instead run
+  // `lp user <name> permission set minecraft.command.op true` and reach the same operator
+  // capability without ever calling `op`. These plugins' mutating power is spread across many
+  // different subcommand trees (permission set/unset, parent add/remove, meta set, group and
+  // track edits, ...) and their few read-only subcommands (e.g. "lp user X info") are not
+  // worth the risk of mis-parsing that grammar — the same trap that made the old
+  // execute-parsing bug possible. A build assistant has no legitimate reason to touch
+  // permissions at all, so the whole command is refused.
+  'lp',
+  'luckperms',
+  'pex',
+  'perm',
+  'perms',
+  'permission',
+  'permissions',
+
+  // --- HuskClaims: only its admin/bypass/mass-delete commands, which have no analogue to a
+  // "read-only subcommand" — see DENIED_SUBCOMMANDS below for why /region is handled
+  // differently. `/claim`, `/trust`, `/unclaim`, etc. only ever act on the invoker's own
+  // claim and stay allowed.
+  'adminclaim', // toggles admin-claim creation mode (bypasses normal claim ownership)
+  'ignoreclaims', // toggles ignoring claim protections/trust entirely
+  'unclaimall', // mass-deletes all of a player's claims
+  'abandonallclaims', // alias of unclaimall
+  'huskclaims', // plugin admin command, including `huskclaims reload`
+
+  // WorldEdit is deliberately NOT covered here: its commands operate on the invoking
+  // player's position/selection, so run from the console (no player) they are already
+  // inert, making them a low-priority target for this list.
+]);
+
+// Commands where only specific destructive subcommands are blocked, because — unlike the
+// commands in DENIED_COMMANDS above — the bare command name also has legitimate read-only or
+// self-scoped uses (info, list, claiming your own area, ...) that a build assistant might
+// reasonably want, so refusing the whole command would over-block. The keys are top-level
+// command names (post namespace-stripping); the values are the destructive subcommand name
+// AND all of its documented aliases (so `/rg del` is caught as readily as `/region delete`).
+const DENIED_SUBCOMMANDS = new Map<string, Set<string>>([
+  // WorldGuard region deletion. `/region` and its `/rg` alias otherwise expose plenty of
+  // harmless subcommands (info, list, flag, select, claim, ...) that stay allowed.
+  ['region', new Set(['remove', 'rem', 'delete', 'del'])],
+  ['rg', new Set(['remove', 'rem', 'delete', 'del'])],
 ]);
 
 /** A command string must never contain these — they let one line of input smuggle a second command. */
@@ -49,21 +101,45 @@ function normalizeCommand(command: string): string {
 }
 
 /**
- * Repeatedly strip a leading `execute ... run ` clause, so nested execute chains
- * (`execute as @a run execute as @b run stop`) reduce to the command actually run.
- * Only unwraps when the command's first token is literally "execute" and a standalone
- * "run" token follows, so a command that merely mentions "run" as an argument elsewhere
- * (and isn't an execute chain to begin with) is left untouched.
+ * Positions in `tokens` where a command name could start: index 0, and — only when the
+ * command is an `execute` invocation, since `run` has no special meaning outside execute's
+ * grammar — the position immediately after every standalone "run" token found anywhere in
+ * the command.
+ *
+ * This deliberately does not try to identify *the* `run` that is execute's grammatical
+ * separator. `execute`'s own arguments (a scoreboard objective, a fake-player/selector name
+ * for `store`/`as`/`at`/..., etc.) are free-form and can themselves be the literal word
+ * "run", so `tokens.indexOf('run')` finds whichever "run" comes first textually, which need
+ * not be the separator at all — that was the bug: `execute store result score run objRun
+ * run stop` has "run" as a fake-player name before the real separator, so indexOf('run')
+ * stops at the wrong one and lets `stop` through unnoticed. Scanning every occurrence of
+ * "run" and treating what immediately follows each one as a candidate command closes that
+ * hole without parsing execute's grammar: for the command above the candidates are "objrun"
+ * (harmless, and not actually a command) and "stop" (denied).
+ *
+ * Trade-off, chosen deliberately: this can flag a token that isn't really a command, when a
+ * denied name is used as an execute argument value immediately before a literal "run" —
+ * e.g. a scoreboard objective literally named "stop": `execute store result score run stop
+ * run tp @s 0 0 0` really only runs a harmless `tp`, but gets refused because "stop" sits
+ * right before the true separator. That's accepted: this list is a safety net against an AI
+ * making a destructive mistake, not a security boundary (see the comment on DENIED_COMMANDS
+ * above), naming a scoreboard objective after an administrative verb is a contrived edge
+ * case, and the alternative — parsing enough of execute's grammar to always find the *true*
+ * separator — reintroduces exactly the class of bug this function exists to fix.
+ *
+ * We deliberately do NOT deny whenever a denied token appears *anywhere* in the command
+ * (i.e. not just right after a "run"): that would refuse ordinary chat like `say stop` or
+ * `say please reload the schematic`, which trades a real, common false positive against a
+ * threat that doesn't exist outside of execute's `run` keyword.
  */
-function peelExecuteRun(command: string): string {
-  let rest = command;
-  for (;;) {
-    const tokens = rest.split(' ');
-    if (tokens[0] !== 'execute') return rest;
-    const runIndex = tokens.indexOf('run');
-    if (runIndex === -1) return rest;
-    rest = tokens.slice(runIndex + 1).join(' ');
+function commandStartIndices(tokens: string[]): number[] {
+  const starts = [0];
+  if (tokens[0] === 'execute') {
+    for (let i = 1; i < tokens.length; i++) {
+      if (tokens[i] === 'run' && i + 1 < tokens.length) starts.push(i + 1);
+    }
   }
+  return starts;
 }
 
 /** Strip every leading `namespace:` segment (minecraft:, bukkit:, paper:, ... repeated) from a token. */
@@ -80,11 +156,17 @@ export function isDenied(command: string): boolean {
   if (hasControlChars(command)) return true;
   const normalized = normalizeCommand(command);
   if (normalized === '') return false;
-  const reduced = peelExecuteRun(normalized);
-  const firstToken = reduced.split(' ')[0] ?? '';
-  if (firstToken === '') return false;
-  const bare = stripNamespacePrefixes(firstToken);
-  return DENIED_COMMANDS.has(bare);
+  const tokens = normalized.split(' ');
+  for (const i of commandStartIndices(tokens)) {
+    const name = stripNamespacePrefixes(tokens[i] ?? '');
+    if (name === '') continue;
+    if (DENIED_COMMANDS.has(name)) return true;
+    const deniedSubs = DENIED_SUBCOMMANDS.get(name);
+    if (deniedSubs === undefined) continue;
+    const sub = tokens[i + 1];
+    if (sub !== undefined && deniedSubs.has(stripNamespacePrefixes(sub))) return true;
+  }
+  return false;
 }
 
 // Minecraft block-state grammar, mirrored from BlockState.parse so replace_filter gets the
@@ -95,8 +177,14 @@ const REPLACE_FILTER_STATE_RE = /^([^[\]]+)(?:\[(.*)])?$/;
 const REPLACE_FILTER_PROP_KEY_RE = /^[a-z0-9_]+$/;
 const REPLACE_FILTER_PROP_VALUE_RE = /^(?:[a-z0-9_]+|-?[0-9]+)$/;
 
+// Rejects ASCII control characters (0x00-0x1F and 0x7F), including the embedded null byte
+// that \s alone doesn't catch: \s matches tab/newline/CR/FF/VT but not NUL or the other C0
+// controls, so a filter like "dirt\0stop" previously slipped past the whitespace check.
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
 /** Returns an error message if `text` isn't a valid replace_filter (block state or #tag), otherwise undefined. */
 export function validateReplaceFilter(text: string): string | undefined {
+  if (CONTROL_CHAR_RE.test(text)) return `invalid replace_filter "${text}": must not contain control characters`;
   if (/\s/.test(text)) return `invalid replace_filter "${text}": must not contain whitespace`;
   const isTag = text.startsWith('#');
   const body = isTag ? text.slice(1) : text;
