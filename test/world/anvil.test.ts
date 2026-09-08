@@ -26,6 +26,20 @@ describe('packing', () => {
     expect(packed.length).toBe(Math.ceil(4096 / 12));
     expect(unpackLongs(packed.map((v) => [Number(v >> 32n), Number(v & 0xffffffffn)]), 5, 4096)).toEqual(values);
   });
+
+  it('unpacks correctly when a packed long has its top bit set', () => {
+    // At 5 bits/value the top bit (63) of a long is never used (12*5=60), so that test above
+    // can't catch a sign-extension bug in longPairToBigInt. Use 32-bit values instead so the
+    // second value of each long lands exactly on bits 32-63, and give it a value whose own top
+    // bit is set so bit 63 of the packed long is 1 - i.e. the long is negative when read signed.
+    const values = [0xffffffff, 0x80000001, 0x00000000, 0xdeadbeef];
+    const packed = packLongs(values, 32);
+    expect(packed).toHaveLength(2);
+    expect(packed[0] < 0n).toBe(false); // packLongs itself always produces non-negative bigints
+    expect(packed[0] & (1n << 63n)).not.toBe(0n); // but the bit pattern's top bit is set
+    const pairs = packed.map((v) => [Number(v >> 32n), Number(v & 0xffffffffn)] as [number, number]);
+    expect(unpackLongs(pairs, 32, values.length)).toEqual(values);
+  });
 });
 
 describe('readChunk', () => {

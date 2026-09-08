@@ -8,7 +8,9 @@ import { gzipSync, gunzipSync } from 'node:zlib';
  * document through them fights the compiler rather than helping it. We deliberately narrow to
  * this single loose shape (matching every tag's actual runtime shape) and do the necessary casts
  * once, here, so the rest of the codebase works with a small, stable, honestly-typed surface
- * instead of `any`.
+ * instead of `any`. Because `value` is `unknown`, the builders below are intentionally loosely
+ * typed: a compound nested under the wrong tag type, or a tag built with the wrong shape for its
+ * `type`, will not be caught by the compiler - only by tests or at runtime.
  */
 export interface NbtTag {
   type: string;
@@ -74,8 +76,19 @@ export function writeNbtGz(root: NbtRoot): Buffer {
   return gzipSync(writeNbtRaw(root));
 }
 
+/**
+ * Assemble prismarine-nbt's [high, low] 32-bit halves into the signed 64-bit BigInt they
+ * represent. Each half is first read as an unsigned 32-bit word (`>>> 0`), then the combined
+ * 64-bit unsigned value is sign-extended with `BigInt.asIntN` so this is an exact inverse of
+ * `bigIntToLongPair` for negative values too (NBT longs are signed two's-complement 64-bit).
+ *
+ * Callers that only care about the raw bit pattern (e.g. `unpackLongs` in `world/anvil.ts`,
+ * which shifts and masks to pull out packed palette/heightmap entries) are unaffected by the
+ * sign: `(v >> k) & mask` yields the same bits whether `v` is negative or its unsigned
+ * 2**64 complement, since BigInt shifts and masks operate on two's-complement semantics.
+ */
 export function longPairToBigInt(pair: [number, number]): bigint {
-  return (BigInt(pair[0] >>> 0) << 32n) | BigInt(pair[1] >>> 0);
+  return BigInt.asIntN(64, (BigInt(pair[0] >>> 0) << 32n) | BigInt(pair[1] >>> 0));
 }
 
 export function bigIntToLongPair(v: bigint): [number, number] {
@@ -84,6 +97,12 @@ export function bigIntToLongPair(v: bigint): [number, number] {
   return [hi, lo];
 }
 
+/**
+ * Longs are read via `longPairToBigInt` then narrowed through `Number`, so any long magnitude
+ * beyond ±2^53 (Number.MAX_SAFE_INTEGER) loses precision here. Callers that need the exact 64-bit
+ * value (e.g. bit-packed long arrays) must go through `longPairToBigInt`/`longPairs` directly
+ * instead of this helper.
+ */
 export function num(c: CompoundValue, k: string, def?: number): number {
   const t = c[k];
   if (!t) {
