@@ -78,9 +78,22 @@ export class RconClient {
     this.socket = socket;
     this.buffer = Buffer.alloc(0);
     this.authed = false;
-    socket.on('data', (d: Buffer) => this.onData(d));
+    socket.on('data', (d: Buffer) => {
+      // A stale socket destroyed by a preceding connect()/close() can still
+      // deliver an already-buffered 'data' event after this.socket has moved
+      // on to a newer socket. Ignore it so it can't corrupt this.buffer or
+      // resolve/interfere with the new socket's in-flight exchange.
+      if (socket !== this.socket) return;
+      this.onData(d);
+    });
     socket.on('error', () => undefined);
     socket.on('close', () => {
+      // close() calls socket.destroy() without awaiting the actual 'close'
+      // event, and connect() immediately swaps in a new socket. The old
+      // socket's 'close' can therefore still arrive after this.socket points
+      // elsewhere; ignore it so it doesn't fail an exchange belonging to the
+      // new socket.
+      if (socket !== this.socket) return;
       this.authed = false;
       const p = this.pending;
       this.pending = undefined;

@@ -6,6 +6,8 @@ export class FakeRcon {
   readonly commands: string[] = [];
   /** Return the response text, or null to never answer (for timeout tests). */
   handler: (cmd: string) => string | null = () => '';
+  /** Delay, in ms, before writing a command's response packet(s). 0 (default) writes immediately, same as before this field existed. */
+  responseDelayMs = 0;
   password = 'secret';
   port = 0;
   private server: net.Server | undefined;
@@ -22,6 +24,28 @@ export class FakeRcon {
       // separate TCP data event (the client's command and sentinel writes
       // are not guaranteed to be coalesced into one event).
       let stalled = false;
+      // All writes for this connection go through this chain so that an
+      // artificially delayed command response (responseDelayMs) still lands
+      // on the wire before a sentinel reply that arrived right behind it in
+      // the same 'data' event, preserving the framing order the real
+      // protocol (and RconClient) depends on.
+      let writeChain: Promise<void> = Promise.resolve();
+      const enqueueWrite = (fn: () => void, delayMs = 0): void => {
+        writeChain = writeChain.then(
+          () =>
+            new Promise<void>((resolve) => {
+              if (delayMs > 0) {
+                setTimeout(() => {
+                  fn();
+                  resolve();
+                }, delayMs);
+              } else {
+                fn();
+                resolve();
+              }
+            }),
+        );
+      };
       socket.on('data', (d) => {
         if (stalled) return;
         buf = Buffer.concat([buf, d]);
@@ -30,10 +54,10 @@ export class FakeRcon {
         for (const p of packets) {
           if (p.type === 3) {
             authed = p.body === this.password;
-            socket.write(encodePacket(authed ? p.id : -1, 2, ''));
+            enqueueWrite(() => socket.write(encodePacket(authed ? p.id : -1, 2, '')));
           } else if (p.type === 2) {
             if (!authed) {
-              socket.write(encodePacket(-1, 2, ''));
+              enqueueWrite(() => socket.write(encodePacket(-1, 2, '')));
               continue;
             }
             this.commands.push(p.body);
@@ -42,13 +66,15 @@ export class FakeRcon {
               stalled = true;
               return;
             }
-            let start = 0;
-            do {
-              socket.write(encodePacket(p.id, 0, out.slice(start, start + 4096)));
-              start += 4096;
-            } while (start < out.length);
+            enqueueWrite(() => {
+              let start = 0;
+              do {
+                socket.write(encodePacket(p.id, 0, out.slice(start, start + 4096)));
+                start += 4096;
+              } while (start < out.length);
+            }, this.responseDelayMs);
           } else {
-            socket.write(encodePacket(p.id, 0, `Unknown request ${p.type.toString(16)}`));
+            enqueueWrite(() => socket.write(encodePacket(p.id, 0, `Unknown request ${p.type.toString(16)}`)));
           }
         }
       });
