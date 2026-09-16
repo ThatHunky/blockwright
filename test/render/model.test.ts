@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { BlockState } from '../../src/voxel/voxels.js';
-import { blockBoxes, isFullOpaque } from '../../src/render/model.js';
+import { blockBoxes, isFullOpaque, occludes } from '../../src/render/model.js';
 
 const boxes = (s: string) => blockBoxes(BlockState.parse(s));
 const height = (s: string) => Math.max(...boxes(s).map((b) => b.y1));
@@ -47,8 +47,17 @@ describe('blockBoxes', () => {
 
   it('drops air and other blocks with nothing to draw', () => {
     expect(boxes('air')).toEqual([]);
-    expect(boxes('water')).toEqual([]);
+    expect(boxes('cave_air')).toEqual([]);
     expect(boxes('barrier')).toEqual([]);
+  });
+
+  it('draws water just below the cell top so a pond is not a hole', () => {
+    const w = boxes('water');
+    expect(w).toHaveLength(1);
+    expect(w[0].y1).toBeCloseTo(0.875);
+    // ...but it must not cull the bank beside it the way a solid block would.
+    expect(isFullOpaque(BlockState.parse('water'))).toBe(false);
+    expect(occludes(BlockState.parse('water'))).toBe(true);
   });
 
   it('does not treat see-through or part-cell blocks as opaque fill', () => {

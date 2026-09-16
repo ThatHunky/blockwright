@@ -1,6 +1,6 @@
 import { VoxelSet, type Box } from '../voxel/voxels.js';
 import { blockColor } from '../blocks/colors.js';
-import { blockBoxes, isFullOpaque, type Box3 } from './model.js';
+import { blockBoxes, isFullOpaque, occludes, type Box3 } from './model.js';
 
 export const VIEWS = ['iso_ne', 'iso_nw', 'iso_se', 'iso_sw', 'top', 'north', 'south', 'east', 'west'] as const;
 export type View = (typeof VIEWS)[number];
@@ -116,7 +116,7 @@ export function renderScene(set: VoxelSet, opts: RenderOptions): RenderedScene {
     if (boxes.length === 0) continue;
     // A block wrapped in full cubes contributes nothing but work: skipping it here is what keeps
     // a solid hillside from rasterising every buried stone block.
-    if (isFullOpaque(state) && neighboursOpaque(set, x, y, z, hide, opts.cutawayY)) continue;
+    if (occludes(state) && neighboursOpaque(set, x, y, z, hide, opts.cutawayY)) continue;
     const c = blockColor(state);
     cells.push({ x, y, z, depth: dot([x + 0.5, y + 0.5, z + 0.5], dir), color: [c.r, c.g, c.b], boxes });
   }
@@ -175,7 +175,7 @@ function neighboursOpaque(set: VoxelSet, x: number, y: number, z: number, hide: 
     const ny = y + dy;
     if (cutawayY !== undefined && ny > cutawayY) return false;
     const s = set.get(x + dx, ny, z + dz);
-    if (!s || !isFullOpaque(s)) return false;
+    if (!s || !occludes(s)) return false;
     if (hide.length && matches(s.shortName, hide)) return false;
   }
   return true;

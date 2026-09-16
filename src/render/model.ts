@@ -27,9 +27,12 @@ const THIN = 0.0625;
 
 /** Blocks with no geometry worth drawing: they would only add noise at block-sized pixels. */
 const INVISIBLE = new Set([
-  'air', 'cave_air', 'void_air', 'barrier', 'structure_void', 'light', 'water', 'lava',
-  'moving_piston', 'bubble_column',
+  'air', 'cave_air', 'void_air', 'barrier', 'structure_void', 'light', 'moving_piston', 'bubble_column',
 ]);
+
+/** Fluids are drawn a notch below the cell top, the way they actually sit in game, so a pond
+ * reads as water rather than as a hole and its bank stands proud of the surface. */
+const FLUID = new Set(['water', 'lava']);
 
 /** Cross-shaped plants: a small upright tuft reads better than a full cube of leaf colour. */
 const SMALL_PLANT = /(^|_)(grass|fern|sapling|seagrass|kelp|vine|flower|tulip|orchid|bluet|daisy|cornflower|allium|dandelion|poppy|lily_of_the_valley|wither_rose|eyeblossom|torchflower|pitcher_plant|mushroom|fungus|roots|sprouts|bush|petals|wildflowers|leaf_litter|dead_bush|hanging_moss|glow_lichen|nether_wart|crop|carrots|potatoes|beetroots|wheat|sweet_berry_bush|cocoa|dripleaf|azalea|spore_blossom|sapling)$/;
@@ -48,6 +51,7 @@ export function blockBoxes(state: BlockState): Box3[] {
   const n = state.shortName;
   const p = state.props;
   if (INVISIBLE.has(n)) return NONE;
+  if (FLUID.has(n)) return [b(0, 0, 0, 1, 0.875, 1)];
 
   if (n.endsWith('_slab')) {
     const t = p.type ?? 'bottom';
@@ -158,8 +162,18 @@ function faceSlab(facing: string, t: number, flip = false): Box3 {
 /** True when the block fills its cell completely and hides whatever is behind it. */
 export function isFullOpaque(state: BlockState): boolean {
   const n = state.shortName;
-  if (INVISIBLE.has(n)) return false;
+  if (INVISIBLE.has(n) || FLUID.has(n)) return false;
   if (/glass|ice$|_pane|tinted|barrier|slime_block|honey_block/.test(n)) return false;
   const boxes = blockBoxes(state);
   return boxes.length === 1 && boxes[0].x0 === 0 && boxes[0].y0 === 0 && boxes[0].z0 === 0 && boxes[0].x1 === 1 && boxes[0].y1 === 1 && boxes[0].z1 === 1;
+}
+
+/**
+ * True when the block hides whatever is directly behind it, for culling only.
+ *
+ * Wider than isFullOpaque because a fluid is drawn opaque: without this, every block of a deep
+ * lake would be rasterised even though only its surface is ever seen.
+ */
+export function occludes(state: BlockState): boolean {
+  return isFullOpaque(state) || FLUID.has(state.shortName);
 }
