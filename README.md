@@ -50,7 +50,7 @@ Then ask: *"Scout a flat spot near me and build a small stone cottage. Preview f
 | `BLOCKWRIGHT_STRUCTURE_THRESHOLD` | `400` | Above this many commands, a build is placed as structure templates instead |
 | `BLOCKWRIGHT_TEMPLATE_MAX` | `48` | Template tile size |
 | `BLOCKWRIGHT_SCHEMATIC_DIR` | `plugins/WorldEdit/schematics` if present, else cwd | Where relative schematic paths resolve |
-| `BLOCKWRIGHT_PREVIEW_DIR` | `~/.cache/blockwright/previews` | Where preview HTML files go |
+| `BLOCKWRIGHT_PREVIEW_DIR` | `~/.cache/blockwright/previews` | Where preview HTML and `render` PNGs go |
 | `BLOCKWRIGHT_DATA_VERSION`, `BLOCKWRIGHT_MC_VERSION` | from `level.dat` | Override when there is no server folder |
 | `BLOCKWRIGHT_ALLOW_ADMIN` | unset | Set to `1` or `true` to let `run_command` run stop/op/ban/whitelist/kick/reload |
 | `BLOCKWRIGHT_SAVE_COALESCE_MS` | `30000` | Reads skip `save-all flush` when nothing was written and the last save is younger than this |
@@ -64,6 +64,7 @@ Then ask: *"Scout a flat spot near me and build a small stone cottage. Preview f
 | `get_players` | Names, worlds, positions, look direction, gamemode |
 | `get_heightmap` | Surface heights and blocks for an x/z rectangle: find a site and the y to build at |
 | `preview` | ASCII slices plus a 3D HTML viewer of a build spec, shape, or schematic, optionally with the surrounding terrain |
+| `render` | Draw the live world (or a schematic) as PNGs from four isometric corners, a plan view or a straight-on elevation, returned inline |
 | `build` | Place a structure written as ASCII layers with a character palette |
 | `place_shape` | Sphere, dome, cylinder, cone, pyramid, line, circle |
 | `fill` | Box fill: replace (with filter), keep, destroy, hollow, outline |
@@ -98,6 +99,32 @@ Every write tool accepts `dry_run`, `snapshot`, `label`, `world` and `allow_unkn
 Everything goes through the normal voxel pipeline, so `dry_run`, snapshots and `undo` work as they do for `build`.
 
 `scatter` reads the same column view and places only at `ground + 1` with air above it: two-block plants get both halves, and a boulder (`radius` 1-3) grows each of its sub-columns from that column's own ground, so nothing it emits can be unsupported.
+
+## Looking at what you built
+
+`read_region` counts blocks and `get_heightmap` gives surface heights, but neither shows whether
+a build *looks* right. `render` reads a box of the world and returns real PNG images, inline, so
+an assistant can see its own work:
+
+```
+render  from: [-978, 55, 448]  to: [-960, 76, 498]
+        views: ["iso_se", "iso_nw"]
+```
+
+- `views` — `iso_ne` / `iso_nw` / `iso_se` / `iso_sw` (the four isometric corners), `top` (a plan,
+  north up) and `north` / `south` / `east` / `west` (straight-on elevations). Up to four per call.
+- Blocks are drawn with the shape they actually have: a fence is a post, a slab is half a cell,
+  a lantern is a small lamp, a plant is a tuft. Drawing them all as cubes is what makes a bridge
+  with a gappy deck look like a solid slab — and hides exactly the mistake the picture exists to
+  catch.
+- `hide` takes block names or globs (`["*_leaves"]`, `["water"]`) so a structure can be seen
+  through a forest or a lake.
+- `cutaway_y` ignores everything above a height, which lifts the roof off an interior.
+- `scale` and `max_pixels` trade detail against size; images over ~900 KB are written to disk and
+  their paths returned instead of being inlined.
+
+One corner is not enough. A top-down view hides every vertical mistake there is, so look from at
+least two opposite corners before calling anything finished.
 
 ## Safety
 

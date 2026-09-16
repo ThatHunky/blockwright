@@ -39,7 +39,7 @@ function check(cond: boolean, msg: string): void {
 await client.connect(transport);
 try {
   const tools = (await client.listTools()).tools.map((t) => t.name);
-  check(tools.length === 18, `18 tools listed (got ${tools.length})`);
+  check(tools.length === 19, `19 tools listed (got ${tools.length})`);
 
   const info = JSON.parse(await call('server_info', {}, true));
   check(info.canRead === true, 'world reads are available');

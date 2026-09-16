@@ -53,8 +53,9 @@ Follow this workflow with the blockwright tools:
 3. Read the resource blockwright://guide/palettes and choose a palette and proportions.
 4. Write a build spec (ASCII layers) or use place_shape. Call preview with context=6 and send the HTML file to the user. Adjust until it looks right.
 5. Call build with dry_run=true, check the block count and box, then build for real. Big builds: split into named steps (label each).
-6. read_region over the build box to verify; fix mistakes with small build calls; use undo if a step went wrong.
+6. read_region over the build box to verify the blocks, then render it from two opposite isometric corners and look. A top-down view and a block count both hide vertical mistakes; the picture is what shows a gappy deck, a railing in the wrong place, a floating tree or a path cut into a trench. Fix with small build calls; use undo if a step went wrong.
 7. Dress the ground with scatter (grass, flowers, the odd boulder) so the site does not read as a bare pad. It only places on solid ground with air above, so nothing can float.
+8. render once more at the end and send the user an image. Never call a build finished on a view you have not actually looked at.
 8. Report what was built, the coordinates, and how to undo it.
 
 Level name: ${ctx.config.levelName}. World reads ${ctx.bridge.canRead() ? 'are available' : 'are NOT available (no BLOCKWRIGHT_SERVER_DIR); skip steps that read the world and warn the user that undo is unavailable'}.`,

@@ -35,6 +35,7 @@ describe('stdio server', () => {
           'undo',
           'terraform',
           'scatter',
+          'render',
         ].sort(),
       );
       expect((await client.listPrompts()).prompts.map((p) => p.name)).toContain('build-workflow');
