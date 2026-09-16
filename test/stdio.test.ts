@@ -33,6 +33,8 @@ describe('stdio server', () => {
           'save_schematic',
           'list_snapshots',
           'undo',
+          'terraform',
+          'scatter',
         ].sort(),
       );
       expect((await client.listPrompts()).prompts.map((p) => p.name)).toContain('build-workflow');

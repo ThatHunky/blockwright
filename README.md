@@ -3,6 +3,7 @@
 An MCP server that lets an AI assistant build real structures on a live Minecraft Java server. No client mod, no bot account: it talks to the server console over RCON, previews every build first, reads the world back from the region files, and snapshots before each write so it can undo.
 
 - **Build** from ASCII layers, geometric shapes, or `.schem`/`.nbt` schematic files
+- **Terraform**: ramp a building pad into the surrounding hillside with a solved, seamless, walkable slope, smooth rough ground, or raise a hill — then scatter plants and boulders that can only land on real ground
 - **Preview** as ASCII slices for the assistant and a self-contained 3D HTML viewer for you, optionally shown in place on the real terrain
 - **Read** the world: heightmaps for scouting a site, block reads to verify a build, save any region to a schematic
 - **Undo**: every write is snapshotted to disk first and restored with one call
@@ -66,6 +67,8 @@ Then ask: *"Scout a flat spot near me and build a small stone cottage. Preview f
 | `build` | Place a structure written as ASCII layers with a character palette |
 | `place_shape` | Sphere, dome, cylinder, cone, pyramid, line, circle |
 | `fill` | Box fill: replace (with filter), keep, destroy, hollow, outline |
+| `terraform` | Shape natural ground: `blend` a pad into the terrain, `smooth` rough ground, raise a `hill` |
+| `scatter` | Plants and boulders on solid ground with air above, by density, palette and seed |
 | `paste_schematic` | Paste a `.schem` (Sponge v1-v3) or `.nbt` (vanilla structure) with rotation and mirror |
 | `schematic_info`, `schematic_write`, `save_schematic` | Inspect a file, write one from a spec, or copy a world region into one |
 | `read_region`, `get_block` | Verify what is in the world |
@@ -80,6 +83,21 @@ Every write tool accepts `dry_run`, `snapshot`, `label`, `world` and `allow_unkn
 - Big pastes are written as vanilla structure files into `<world>/generated/blockwright/structure/` and placed with `place template`, which needs no reload and no physics pass.
 - Reads run `save-all flush` and parse the Anvil region files directly (26.x `dimensions/` layout and the classic layout). Heightmaps come straight from the chunk data.
 - Snapshots are the read box written as structure files, restored with `place template`, so they survive restarts. The newest 50 are kept.
+
+## Terraforming
+
+`terraform` exists because levelling a site with `fill` leaves a cut cube in the landscape, and hand-rolled slopes come out as terraces or concentric rings. It works on the height field instead:
+
+1. Read the box and find the real ground surface per column — the highest solid block, ignoring leaves, logs, snow and water, so one oak does not put the "surface" twelve blocks up. Without world reads it falls back to a console probe (`execute if block … air`, binary-searched per column), which is slower, capped, and cannot snapshot.
+2. Freeze what must not move: the box border (so the result meets real terrain with no seam), the pad given by `keep_from`/`keep_to`, anything in `protect`, and any ungenerated column.
+3. Solve the interior as a harmonic field (multigrid Gauss-Seidel) with those frozen values as boundary conditions. A harmonic function has no interior maximum or minimum, so the ramp between pad and terrain can only descend — no terraces, no rings.
+4. Add 4 octaves of value-noise fBm at a 32-block base wavelength (the octave counts and wavelengths vanilla uses for its own surface noise), with its amplitude faded to zero at both the pad edge and the border, seeded so the same call always gives the same ground.
+5. Box-blur, round to whole blocks, and clamp the height difference between neighbouring columns to `max_step` (default 1) so the result is walkable. When the pad height and the border terrain simply cannot be joined that gently, it says so instead of hiding a cliff.
+6. Apply per column: air above the new surface, `top_block`, `soil_depth` blocks of soil, then stone only where there is nothing already — existing stone, ores and caves below the fill are never replaced. Columns that are already at their target emit nothing at all, which is what leaves the border and its trees untouched.
+
+Everything goes through the normal voxel pipeline, so `dry_run`, snapshots and `undo` work as they do for `build`.
+
+`scatter` reads the same column view and places only at `ground + 1` with air above it: two-block plants get both halves, and a boulder (`radius` 1-3) grows each of its sub-columns from that column's own ground, so nothing it emits can be unsupported.
 
 ## Safety
 

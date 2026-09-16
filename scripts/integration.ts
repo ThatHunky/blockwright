@@ -39,7 +39,7 @@ function check(cond: boolean, msg: string): void {
 await client.connect(transport);
 try {
   const tools = (await client.listTools()).tools.map((t) => t.name);
-  check(tools.length === 16, `16 tools listed (got ${tools.length})`);
+  check(tools.length === 18, `18 tools listed (got ${tools.length})`);
 
   const info = JSON.parse(await call('server_info', {}, true));
   check(info.canRead === true, 'world reads are available');
@@ -81,6 +81,24 @@ try {
 
   const restored = await call('read_region', { from: [X, y, Z], to: [X + 4, y + 4, Z + 4] }, true);
   check(!/stone_bricks/.test(restored), 'no stone bricks remain after undo');
+
+  // Terrain tools are exercised as dry runs only: they read the real world and compile a real
+  // write, which is the part worth testing against a live server, without reshaping anyone's
+  // ground to prove it.
+  const terra = await call(
+    'terraform',
+    { from: [X - 20, surface - 20, Z - 20], to: [X + 24, surface + 16, Z + 24], keep_from: [X, Z], keep_to: [X + 4, Z + 4], keep_y: surface + 1, dry_run: true },
+    true,
+  );
+  check(/Target ground height/.test(terra), 'terraform planned a height field from the real surface');
+  check(/DRY RUN/.test(terra), 'terraform dry run did not write');
+
+  const scat = await call(
+    'scatter',
+    { from: [X - 8, surface - 8, Z - 8], to: [X + 8, surface + 8, Z + 8], palette: [{ block: 'short_grass' }, { block: 'poppy' }], density: 0.2, dry_run: true },
+    true,
+  );
+  check(/DRY RUN|nothing placed/.test(scat), 'scatter dry run did not write');
 
   console.log('\nINTEGRATION OK');
 } finally {
