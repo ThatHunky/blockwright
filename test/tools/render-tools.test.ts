@@ -46,7 +46,7 @@ describe('render', () => {
   it('refuses more views than it will draw', async () => {
     const r = await call(client, 'render', {
       from: [0, 60, 0], to: [4, 64, 4],
-      views: ['iso_ne', 'iso_nw', 'iso_se', 'iso_sw', 'top'],
+      views: ['iso_ne', 'iso_nw', 'iso_se', 'iso_sw', 'top', 'north', 'south', 'east', 'west', 'top'],
     });
     expect(r.isError).toBe(true);
   });

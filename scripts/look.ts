@@ -16,7 +16,7 @@ const box = { min: [+x0, +y0, +z0] as [number, number, number], max: [+x1, +y1, 
 const { voxels, missingChunks } = await readVoxels(dir, box);
 console.log(`voxels ${voxels.size}, missing chunks ${missingChunks}`);
 for (const v of views) {
-  const scene = renderScene(voxels, { view: v as View, maxPixels: 1100 });
+  const scene = renderScene(voxels, { view: v as View, maxPixels: +(process.env.MAXPX ?? 1100) });
   writeFileSync(`${out}-${v}.png`, encodePng(scene.width, scene.height, scene.pixels));
   console.log(`${v}: ${scene.width}x${scene.height}, ${scene.blocks} blocks, ${scene.scale}px/block`);
 }

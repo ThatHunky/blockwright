@@ -136,13 +136,13 @@ export function renderScene(set: VoxelSet, opts: RenderOptions): RenderedScene {
       if (v < vMin) vMin = v; if (v > vMax) vMax = v;
     }
   }
-  const maxPixels = opts.maxPixels ?? 1400;
+  const maxPixels = opts.maxPixels ?? 2400;
   const spanU = Math.max(uMax - uMin, 1e-6);
   const spanV = Math.max(vMax - vMin, 1e-6);
-  const scale = opts.scale ?? Math.max(1, Math.min(24, Math.floor(maxPixels / Math.max(spanU, spanV))));
+  const scale = opts.scale ?? Math.max(1, Math.min(48, Math.floor(maxPixels / Math.max(spanU, spanV))));
   const pad = 1;
-  const width = Math.max(1, Math.min(4096, Math.ceil(spanU * scale) + pad * 2));
-  const height = Math.max(1, Math.min(4096, Math.ceil(spanV * scale) + pad * 2));
+  const width = Math.max(1, Math.min(8192, Math.ceil(spanU * scale) + pad * 2));
+  const height = Math.max(1, Math.min(8192, Math.ceil(spanV * scale) + pad * 2));
   const bg = opts.background ?? [150, 180, 215];
   const px = new Uint8Array(width * height * 3);
   for (let i = 0; i < width * height; i++) {

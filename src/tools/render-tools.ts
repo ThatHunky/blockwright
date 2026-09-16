@@ -15,10 +15,10 @@ import { maxReadVolume } from './read-tools.js';
 import { fail, errorMessage } from './result.js';
 
 const KEEP_RENDERS = 40;
-const MAX_VIEWS = 4;
+const MAX_VIEWS = 9;
 /** Ceiling on a single inlined image. Past roughly this size the picture stops being a cheap
  * glance for the agent and starts crowding out the conversation it is meant to inform. */
-const MAX_INLINE_BYTES = 900_000;
+const MAX_INLINE_BYTES = 3_000_000;
 
 async function writeRender(ctx: AppContext, name: string, png: Buffer): Promise<string> {
   await fs.mkdir(ctx.config.previewDir, { recursive: true });
@@ -46,9 +46,9 @@ export function registerRenderTools(server: McpServer, ctx: AppContext): void {
         to: Vec3Schema.optional().describe('Max corner of the box to render'),
         schematic: z.string().optional().describe('Render a saved schematic instead of the world'),
         world: WorldSchema.optional(),
-        views: z.array(z.enum(VIEWS)).min(1).max(MAX_VIEWS).default(['iso_se']).describe(`Up to ${MAX_VIEWS} cameras; each returns one image`),
-        scale: z.number().int().min(1).max(24).optional().describe('Pixels per block; omit to fit max_pixels'),
-        max_pixels: z.number().int().min(64).max(4096).default(1400).describe('Longest side of the image in pixels'),
+        views: z.array(z.enum(VIEWS)).min(1).max(MAX_VIEWS).default(['iso_ne', 'iso_sw', 'iso_nw', 'iso_se']).describe(`Up to ${MAX_VIEWS} cameras (all nine allowed); each returns one image. Default is the four isometric corners — every side of a build gets seen`),
+        scale: z.number().int().min(1).max(48).optional().describe('Pixels per block; omit to fit max_pixels'),
+        max_pixels: z.number().int().min(64).max(8192).default(2400).describe('Longest side of the image in pixels'),
         hide: z.array(z.string()).optional().describe('Block names drawn as air, e.g. ["oak_leaves","*_leaves"] to see through a forest, or ["water"]'),
         cutaway_y: z.number().int().optional().describe('Ignore everything above this y — lifts the roof off an interior'),
         background: z.string().optional().describe('Background colour as "r,g,b" (default sky blue)'),
