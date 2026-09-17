@@ -54,6 +54,7 @@ Follow this workflow with the blockwright tools:
 4. Write a build spec (ASCII layers) or use place_shape. Call preview with context=6 and send the HTML file to the user. Adjust until it looks right.
 5. Call build with dry_run=true, check the block count and box, then build for real. Big builds: split into named steps (label each).
 6. read_region over the build box to verify the blocks, then render it from two opposite isometric corners and look. A top-down view and a block count both hide vertical mistakes; the picture is what shows a gappy deck, a railing in the wrong place, a floating tree or a path cut into a trench. Fix with small build calls; use undo if a step went wrong.
+6b. Check the ground by the numbers, which a picture cannot show: walk every path, stair, bridge and doorway approach (it lists each step over 0.6, drop over 3, blocked headroom, water and obstacle with coordinates), profile a road with width>0 to see whether it sits in a trench, and slope over anything terraformed to find lips and cliffs. Fix and re-check until walk reports no problems.
 7. Dress the ground with scatter (grass, flowers, the odd boulder) so the site does not read as a bare pad. It only places on solid ground with air above, so nothing can float.
 8. render once more at the end and send the user an image. Never call a build finished on a view you have not actually looked at.
 8. Report what was built, the coordinates, and how to undo it.

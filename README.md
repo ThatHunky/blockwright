@@ -6,6 +6,7 @@ An MCP server that lets an AI assistant build real structures on a live Minecraf
 - **Terraform**: ramp a building pad into the surrounding hillside with a solved, seamless, walkable slope, smooth rough ground, or raise a hill — then scatter plants and boulders that can only land on real ground
 - **Preview** as ASCII slices for the assistant and a self-contained 3D HTML viewer for you, optionally shown in place on the real terrain
 - **Read** the world: heightmaps for scouting a site, block reads to verify a build, save any region to a schematic
+- **Check** the ground by the numbers: walk a path block by block for steps, drops, headroom and obstacles; profile a line for its grade and cross-section; map the steepness and cliffs of an area
 - **Undo**: every write is snapshotted to disk first and restored with one call
 - Works on vanilla, Paper, Spigot, Fabric servers with RCON enabled; tested on Paper 26.2
 
@@ -65,6 +66,9 @@ Then ask: *"Scout a flat spot near me and build a small stone cottage. Preview f
 | `get_heightmap` | Surface heights and blocks for an x/z rectangle: find a site and the y to build at |
 | `preview` | ASCII slices plus a 3D HTML viewer of a build spec, shape, or schematic, optionally with the surrounding terrain |
 | `render` | Draw the live world (or a schematic) as PNGs from four isometric corners, a plan view or a straight-on elevation, returned inline |
+| `walk` | Walk a polyline block by block: exact standing heights, every step over 0.6, drop over 3, blocked headroom, water and obstacle with coordinates |
+| `profile` | Ground elevation along a line with grades, trees and water, an optional cross-section, and an ASCII elevation chart |
+| `slope` | Steepness map of an x/z box as characters, the cliffs in it, and how much of it is walkable |
 | `build` | Place a structure written as ASCII layers with a character palette |
 | `place_shape` | Sphere, dome, cylinder, cone, pyramid, line, circle |
 | `fill` | Box fill: replace (with filter), keep, destroy, hollow, outline |
@@ -125,6 +129,35 @@ render  from: [-978, 55, 448]  to: [-960, 76, 498]
 
 One corner is not enough. A top-down view hides every vertical mistake there is, so look from at
 least two opposite corners before calling anything finished.
+
+## Checking the ground by the numbers
+
+A picture shows whether a build looks right; it does not show a 1-block lip on a path, a stair
+climbed into its back, or leaves at head height. `walk`, `profile` and `slope` read the same
+region files and answer in text an assistant can check line by line:
+
+```
+walk  path: [[-1127, 128, 289], [-1119, 128, 286], [-1119, 127, 272]]
+```
+
+- `walk` fills the polyline in as a 4-connected grid line and finds the floor of every cell — near
+  the given y (±8), or the highest walkable surface for `[x, z]` points. Standing height is the
+  block's collision top: a bottom slab is +0.5, `dirt_path` and farmland 15/16, a carpet 1/16, a
+  snow layer one layer less than it looks; flowers, grass, torches and signs are walked through;
+  leaves, fences and walls are obstacles, never floors. A bottom stair entered from anywhere but
+  its back counts as two half steps. Problems: `step_up` (over `max_step`, default 0.6),
+  `fall` (over 3), `no_floor`, `water`, `headroom` (default 2 clear blocks), `obstacle`,
+  `ungenerated`. Flat stretches are run-length collapsed.
+- `profile` lists ground height along a line — plants, leaves and logs ignored, trees and water
+  reported separately — with total rise and fall, the steepest change over 1, 3 and 10 cells, an
+  ASCII elevation chart, and with `width` a cross-section per cell that shows a road sunk in a
+  trench.
+- `slope` draws each column's largest step to its neighbours (`.` level, `:` a walkable half step,
+  `1`–`9` blocks, `#` 10+, `~` water), lists connected cliffs of 1.5+ blocks with their extent and
+  height, and says how much of the area can be walked without jumping.
+
+All three read one chunk at a time over only the y range they need, into a small bounded cache, so
+a long diagonal path costs a few chunk reads rather than its bounding box.
 
 ## Safety
 

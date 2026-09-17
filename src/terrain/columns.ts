@@ -23,7 +23,7 @@ export type Cell = 0 | 1 | 2 | 3 | 4;
 
 const WATER = new Set(['water', 'flowing_water', 'bubble_column']);
 
-const PLANTS = new Set([
+export const PLANTS = new Set([
   'short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'bush', 'firefly_bush', 'leaf_litter',
   'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant', 'sea_pickle', 'lily_pad', 'sugar_cane', 'cactus',
   'cactus_flower', 'bamboo', 'bamboo_sapling', 'vine', 'glow_lichen', 'sculk_vein', 'hanging_roots',
@@ -37,7 +37,7 @@ const PLANTS = new Set([
   'attached_pumpkin_stem', 'nether_wart', 'cocoa', 'frogspawn', 'fire', 'soul_fire', 'torch', 'redstone_torch',
 ]);
 
-const PLANT_SUFFIXES = ['_sapling', '_tulip', '_carpet', '_coral', '_coral_fan', '_coral_wall_fan', '_fungus', '_mushroom', '_roots', '_sprouts'];
+export const PLANT_SUFFIXES = ['_sapling', '_tulip', '_carpet', '_coral', '_coral_fan', '_coral_wall_fan', '_fungus', '_mushroom', '_roots', '_sprouts'];
 const CANOPY_SUFFIXES = ['_log', '_wood', '_leaves', '_stem', '_hyphae', '_mushroom_block'];
 const CANOPY = new Set(['mushroom_stem', 'nether_wart_block', 'warped_wart_block', 'shroomlight']);
 

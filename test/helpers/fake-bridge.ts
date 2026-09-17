@@ -48,15 +48,21 @@ export class FakeBridge implements Bridge {
   async heightmap(minX: number, minZ: number, maxX: number, maxZ: number): Promise<HeightmapResult> {
     const heights: number[][] = [];
     const surface: (string | null)[][] = [];
+    // One pass over the world rather than one per column, so a chunk-sized request stays cheap.
+    const tops = new Map<string, { y: number; block: string }>();
+    for (const [p, s] of this.world.entries()) {
+      if (s.isAir || p[0] < minX || p[0] > maxX || p[2] < minZ || p[2] > maxZ) continue;
+      const k = `${p[0]},${p[2]}`;
+      const t = tops.get(k);
+      if (!t || p[1] > t.y) tops.set(k, { y: p[1], block: s.toCommand() });
+    }
     for (let z = minZ; z <= maxZ; z++) {
       const hr: number[] = [];
       const sr: (string | null)[] = [];
       for (let x = minX; x <= maxX; x++) {
-        let top = -65;
-        let block: string | null = null;
-        for (const [p, s] of this.world.entries()) if (p[0] === x && p[2] === z && !s.isAir && p[1] > top) { top = p[1]; block = s.toCommand(); }
-        hr.push(top);
-        sr.push(block);
+        const t = tops.get(`${x},${z}`);
+        hr.push(t ? t.y : -65);
+        sr.push(t ? t.block : null);
       }
       heights.push(hr);
       surface.push(sr);
